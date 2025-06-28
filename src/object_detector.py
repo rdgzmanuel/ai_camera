@@ -222,7 +222,7 @@ if __name__ == "__main__":
     # model_name: str = "yolo11s.pt"
     # model_path: str = os.path.join(models_folder, model_name)
 
-    model_path: str = "runs/detect/yolov11_1/weights/best.pt"
+    model_path: str = "runs/detect/yolov11_2/weights/best.pt"
 
     tracker = PlayerTracker(
         model_path=model_path,
