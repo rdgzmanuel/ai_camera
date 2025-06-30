@@ -18,17 +18,6 @@ def convert_to_yolo(
 ) -> Tuple[float, float, float, float]:
     """
     Converts absolute bounding box coordinates to normalized YOLO format.
-
-    Args:
-        x (float): Top-left x coordinate.
-        y (float): Top-left y coordinate.
-        w (float): Width of the box.
-        h (float): Height of the box.
-        img_w (int): Image width.
-        img_h (int): Image height.
-
-    Returns:
-        tuple[float, float, float, float]: Normalized (x_center, y_center, width, height).
     """
     x_center = (x + w / 2) / img_w
     y_center = (y + h / 2) / img_h
@@ -41,17 +30,20 @@ def prepare_yolo_dataset(
     csv_dir: str,
     video_dir: str,
     output_dir: str,
-    train_ratio: float = 0.8
+    train_ratio: float = 0.8,
+    frame_step: int = 5
 ) -> None:
     """
-    Converts soccer CSV annotations to YOLO format, discards invalid frames,
-    splits into train/val sets, and creates a clean YOLO dataset directory structure.
+    Converts soccer CSV annotations to YOLO format, sampling every N frames,
+    discarding invalid frames, splitting into train/val sets, and creating
+    a clean YOLO dataset directory structure.
 
     Args:
         csv_dir (str): Path to directory containing CSV annotation files.
         video_dir (str): Path to directory containing video files.
         output_dir (str): Path to output root directory for YOLO dataset.
         train_ratio (float): Proportion of images to use for training set.
+        frame_step (int): Interval for frame sampling (e.g., 5 = every 5th frame).
     """
     tmp_images: Path = Path(output_dir) / "_all_images"
     tmp_labels: Path = Path(output_dir) / "_all_labels"
@@ -84,12 +76,19 @@ def prepare_yolo_dataset(
 
         saved_frames: int = 0
 
-        for frame_idx, row in data.iterrows():
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        for frame_idx in range(0, total_frames, frame_step):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 continue
 
+            # Match annotation row (if exists)
+            if frame_idx >= len(data):
+                continue
+
+            row = data.iloc[frame_idx]
             img_h, img_w = frame.shape[:2]
             image_name: str = f"{csv_file.stem}_frame{frame_idx:04d}.jpg"
             label_name: str = image_name.replace(".jpg", ".txt")
@@ -119,7 +118,6 @@ def prepare_yolo_dataset(
             if has_invalid or not boxes:
                 continue  # skip this frame
 
-            # Save cleaned image and label
             cv2.imwrite(str(tmp_images / image_name), frame)
             with open(tmp_labels / label_name, "w") as f:
                 for line in boxes:
@@ -159,8 +157,6 @@ def prepare_yolo_dataset(
             base = img.replace(".jpg", "")
             shutil.move(str(tmp_images / img), str(output_dir_path / "images" / split / img))
             shutil.move(str(tmp_labels / f"{base}.txt"), str(output_dir_path / "labels" / split / f"{base}.txt"))
-    
-    print("🔹 Cleaning up temporary files...")
 
     shutil.rmtree(tmp_images)
     shutil.rmtree(tmp_labels)
@@ -170,8 +166,9 @@ def prepare_yolo_dataset(
 
 if __name__ == "__main__":
     prepare_yolo_dataset(
-        csv_dir="videos/soccertrack/wide_view/annotations",
-        video_dir="videos/soccertrack/wide_view/videos",
+        csv_dir="videos/soccertrack/annotations",
+        video_dir="videos/soccertrack/videos",
         output_dir="videos/soccertrack/yolo_dataset",
-        train_ratio=0.8
+        train_ratio=0.8,
+        frame_step=5  # Sample every 5th frame
     )
