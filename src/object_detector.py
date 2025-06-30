@@ -218,11 +218,11 @@ if __name__ == "__main__":
     output_dir: str = "videos/detection_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    # models_folder: str = "models"
-    # model_name: str = "yolo11s.pt"
-    # model_path: str = os.path.join(models_folder, model_name)
+    models_folder: str = "models"
+    model_name: str = "yolo11m.pt"
+    model_path: str = os.path.join(models_folder, model_name)
 
-    model_path: str = "runs/detect/yolov11_1/weights/best.pt"
+    # model_path: str = "models/yolov11m_3/last.pt"
 
     tracker = PlayerTracker(
         model_path=model_path,
