@@ -1,18 +1,19 @@
 from ultralytics import YOLO
 
 def main():
-    model = YOLO("models/yolo11s.pt")
+    model = YOLO("models/yolo11n.pt")
 
     model.train(
         data="football.yaml",
-        epochs=16,
-        patience=5,
-        imgsz=640,
+        epochs=300,
+        patience=50,
+        imgsz=1280,
         batch=16,
-        lr0=1e-4,
+        lr0=1e-3,
         optimizer="Adam",
         close_mosaic=5,
-        name="yolov11s_1"
+        rect=True,
+        name="yolov11n_17"
     )
 
 if __name__ == "__main__":

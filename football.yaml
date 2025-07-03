@@ -4,3 +4,4 @@ train: images/train
 val: images/val
 nc: 2
 names: ['player', 'ball']
+cls_weights: [1.0, 20.0]

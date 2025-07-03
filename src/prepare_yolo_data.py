@@ -166,8 +166,8 @@ def prepare_yolo_dataset(
 
 if __name__ == "__main__":
     prepare_yolo_dataset(
-        csv_dir="videos/soccertrack/annotations",
-        video_dir="videos/soccertrack/videos",
+        csv_dir="videos/soccertrack/versions/6/wide_view/annotations",
+        video_dir="videos/soccertrack/versions/6/wide_view/videos",
         output_dir="videos/soccertrack/yolo_dataset",
         train_ratio=0.8,
         frame_step=5  # Sample every 5th frame
