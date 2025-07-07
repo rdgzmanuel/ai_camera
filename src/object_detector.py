@@ -16,7 +16,7 @@ class PlayerTracker:
     Computes dynamic focus boxes and smooth camera movement.
     """
 
-    def __init__(self, model_path: str = "models/yolo11s.pt",
+    def __init__(self, model_path: str = "models/yolo11n_nb_1280_300/best.pt",
                  device: str = "cpu",
                  chosen_resolution: str = "FHD") -> None:
         """
@@ -32,7 +32,7 @@ class PlayerTracker:
         self.max_det: int = 300
         self.model: YOLO = YOLO(model_path).to(device)
 
-        self.skip_frames: int = 1
+        self.skip_frames: int = 3
         self.n: float = 1.75  # Scale factor for expanded box
         self.p: float = 0.85  # Percentage of boxes to consider
 
@@ -47,6 +47,7 @@ class PlayerTracker:
 
         # Visualization parameters
         self.aspect_ratio: Tuple[int, int] = (16, 9)
+        self.target_ratio: float = self.aspect_ratio[0] / self.aspect_ratio[1]
         self.current_box_info: Optional[Tuple[float, float, float, float]] = None
         self.max_speed: float = 7.0
 
@@ -104,13 +105,12 @@ class PlayerTracker:
 
                 box_info = self.compute_focus_box(
                     focus_input,
-                    self.p,
-                    frame_shape=frame.shape
+                    self.p
                 )
 
             if box_info is not None:
-                box_info = self.update_box_info(box_info)
-                tight_box, expanded_box = self.get_boxes(box_info, self.n, frame.shape)
+                updated_box_info = self.update_box_info(box_info)
+                tight_box, expanded_box = self.get_boxes(updated_box_info, self.n, frame.shape)
 
                 if real_output:
                     # Crop to expanded box only
@@ -319,8 +319,7 @@ class PlayerTracker:
     def compute_focus_box(
         self,
         detections: List[dict],
-        p: float,
-        frame_shape: Tuple[int, int, int]
+        p: float
     ) -> Optional[Tuple[float, float, float, float]]:
         """
         Computes the smallest bounding box containing p% of detections.
@@ -363,11 +362,10 @@ class PlayerTracker:
         w = max_x - min_x
         h = max_y - min_y
 
-        target_ratio = self.aspect_ratio[0] / self.aspect_ratio[1]
-        if h == 0 or w / h > target_ratio:
-            h = max(1e-5, w / target_ratio)
+        if h == 0 or w / h > self.target_ratio:
+            h = max(1e-5, w / self.target_ratio)
         else:
-            w = max(1e-5, h * target_ratio)
+            w = max(1e-5, h * self.target_ratio)
 
         return cx, cy, w, h
 
@@ -397,8 +395,17 @@ class PlayerTracker:
             else:
                 new_val = cur + np.sign(diff) * self.max_speed
             updated.append(new_val)
+        
+        cx, cy, w, h = updated
+        target_ratio = self.aspect_ratio[0] / self.aspect_ratio[1]
+        if h == 0 or w / h > target_ratio:
+            h = max(1e-5, w / target_ratio)
+        else:
+            w = max(1e-5, h * target_ratio)
 
-        self.current_box_info = tuple(updated)
+        updated = (cx, cy, w, h)
+
+        self.current_box_info = updated
         return self.current_box_info
 
 
@@ -474,12 +481,12 @@ class PlayerTracker:
 
 
 if __name__ == "__main__":
-    # input_video = "videos/soccertrack/wide_view/videos/F_20200220_1_0030_0060.mp4"
-    input_video = "videos/hqsport-clip.mp4"
+    input_video = "videos/soccertrack/wide_view/videos/F_20200220_1_0030_0060.mp4"
+    input_video = "videos/hqsport-clip-3.mp4"
     output_dir = "videos/output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    model_path = "models/yolo11n_nb_1280_300/best.pt"
+    model_path = "models/yolo11n.pt"
 
     tracker = PlayerTracker(
         model_path=model_path,
