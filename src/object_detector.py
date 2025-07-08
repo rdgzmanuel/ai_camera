@@ -18,6 +18,7 @@ class PlayerTracker:
 
     def __init__(self, model_path: str = "models/yolo11n_nb_1280_300/best.pt",
                  device: str = "cpu",
+                 frame_interval: int = 1,
                  chosen_resolution: str = "FHD") -> None:
         """
         Initializes the PlayerTracker.
@@ -27,23 +28,25 @@ class PlayerTracker:
             device: Device to run inference on ('cpu' or 'cuda').
         """
         self.device: str = device
-        self.conf_thresh: float = 0.1
+        self.conf_thresh: float = 0.15
         self.iou_thresh: float = 0.1
         self.max_det: int = 300
         self.model: YOLO = YOLO(model_path).to(device)
 
-        self.skip_frames: int = 3
+        self.frame_interval: int = frame_interval
         self.n: float = 1.75  # Scale factor for expanded box
         self.p: float = 0.85  # Percentage of boxes to consider
+        self.default_fps: int = 25
+        self.frame_rate: int = self.default_fps // self.frame_interval
 
         tracker_args: dict = {
             "track_thresh": self.conf_thresh,
             "track_buffer": 30,
-            "match_thresh": 0.8,
+            "match_thresh": 0.95,
             "min_box_area": 5,
             "mot20": False,
         }
-        self.tracker: BYTETracker = BYTETracker(SimpleNamespace(**tracker_args), frame_rate=30)
+        self.tracker: BYTETracker = BYTETracker(SimpleNamespace(**tracker_args), frame_rate=self.frame_rate)
 
         # Visualization parameters
         self.aspect_ratio: Tuple[int, int] = (16, 9)
@@ -57,7 +60,7 @@ class PlayerTracker:
             "QHD": (2560, 1440),
             "4K": (3840, 2160),
         }
-        self.resolution: tuple[int, int] = self.resolutions[chosen_resolution]  # Default to FHD
+        self.resolution: tuple[int, int] = self.resolutions[chosen_resolution]
 
 
     def process_video(
@@ -96,7 +99,7 @@ class PlayerTracker:
 
             frame_start: float = time.time()
 
-            if frame_id % self.skip_frames == 0:
+            if frame_id % self.frame_interval == 0:
                 detections, tracks = self.process_frame(frame, tracking=tracking)
                 if tracking:
                     focus_input = self.tracks_to_detections(tracks)
@@ -221,7 +224,7 @@ class PlayerTracker:
             conf = float(box.conf[0])
             cls = int(box.cls[0])
 
-            if conf >= self.conf_thresh:
+            if conf >= self.conf_thresh and cls == 0:
                 detections.append({
                     "bbox": (x1, y1, x2, y2),
                     "conf": conf,
@@ -486,18 +489,20 @@ if __name__ == "__main__":
     output_dir = "videos/output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    model_path = "models/yolo11n.pt"
+    model_path: str = "models/yolo11n.pt"
+    frame_interval: int = 3
 
     tracker = PlayerTracker(
         model_path=model_path,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        frame_interval=frame_interval,
     )
 
     output_path = os.path.join(output_dir, "output_tracking.mp4")
     tracker.process_video(
         input_video,
         output_path,
-        tracking=False,
+        tracking=True,
         display=True,
         real_output=False
     )
