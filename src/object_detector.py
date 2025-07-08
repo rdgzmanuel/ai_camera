@@ -42,7 +42,7 @@ class PlayerTracker:
         tracker_args: dict = {
             "track_thresh": self.conf_thresh,
             "track_buffer": 30,
-            "match_thresh": 0.95,
+            "match_thresh": 0.99,
             "min_box_area": 5,
             "mot20": False,
         }
@@ -485,12 +485,12 @@ class PlayerTracker:
 
 if __name__ == "__main__":
     input_video = "videos/soccertrack/wide_view/videos/F_20200220_1_0030_0060.mp4"
-    input_video = "videos/hqsport-clip-3.mp4"
+    input_video = "videos/WhatsApp Video 2025-07-08 at 12.12.23.mp4"
     output_dir = "videos/output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
     model_path: str = "models/yolo11n.pt"
-    frame_interval: int = 3
+    frame_interval: int = 4
 
     tracker = PlayerTracker(
         model_path=model_path,
