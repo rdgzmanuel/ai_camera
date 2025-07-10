@@ -1,6 +1,7 @@
 /venv
 
 /videos
+/src/quantization/calibration_data
 
 /models
 
