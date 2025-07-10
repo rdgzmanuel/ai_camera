@@ -115,13 +115,14 @@ class PlayerTracker:
             if frame_id % self.frame_interval == 0:
                 # Full detection every n * frame_interval frames
                 if frame_id % (self.frame_interval * self.full_frame_interval_factor) == 0 or self.expanded_box is None:
-                    detections, tracks = self.process_frame(frame, tracking=tracking)
+                    detections = self.obtain_detections(frame)
+                    
                 else:
                     # ROI detection inside expanded box
                     ex1, ey1, ex2, ey2 = self.expanded_box
                     roi = frame[ey1:ey2, ex1:ex2]
                     # resized_roi = cv2.resize(roi, self.resolution)  # match model input size
-                    detections, tracks = self.process_frame(roi, tracking=tracking)
+                    detections = self.obtain_detections(roi)
 
                     for d in detections:
                         x1, y1, x2, y2 = d["bbox"]
@@ -134,6 +135,7 @@ class PlayerTracker:
 
                 # Update focus box
                 if tracking:
+                    tracks = self.obtain_tracks(frame, detections)
                     focus_input = self.tracks_to_detections(tracks)
                 else:
                     focus_input = detections
@@ -223,6 +225,71 @@ class PlayerTracker:
         cv2.putText(frame, f"Overall FPS: {effective_fps:.2f}", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         return frame, effective_fps, total_frames
+    
+
+    def obtain_detections(self, frame: np.ndarray) -> list[dict]:
+        """
+        Runs detection on a frame and returns the results.
+
+        Args:
+            frame: Input frame.
+
+        Returns:
+            List of detection dictionaries.
+        """
+        h, w = frame.shape[:2]
+
+        if self.onnx:
+            detections: list[dict] = self.model.pipeline(frame, self.conf_thresh, self.iou_thresh)
+
+        else:
+            results = self.model(
+                frame,
+                conf=self.conf_thresh,
+                iou=self.iou_thresh,
+                max_det=self.max_det,
+                verbose=False
+            )[0]
+
+            detections = []
+            for box in results.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                conf = float(box.conf[0])
+                cls = int(box.cls[0])
+
+                if conf >= self.conf_thresh and cls == 0:
+                    detections.append({
+                        "bbox": (x1, y1, x2, y2),
+                        "conf": conf,
+                        "class": cls
+                    })
+        return detections
+
+
+    def obtain_tracks(self, frame: np.ndarray, detections: list[dict]) -> list[STrack]:
+        """
+        Runs tracking on a frame using the provided detections.
+
+        Args:
+            frame: Input frame.
+            detections: List of detection dictionaries.
+
+        Returns:
+            List of tracked STrack objects.
+        """
+        h, w = frame.shape[:2]
+
+        tracking_input = np.array(
+            [[*det["bbox"], det["conf"]] for det in detections],
+            dtype=np.float32
+        ) if detections else np.empty((0, 5), dtype=np.float32)
+
+        tracks: List[STrack] = []
+        if tracking_input.size > 0:
+            tracks = self.tracker.update(tracking_input, [h, w], [h, w])
+
+        return tracks
+
 
 
     def process_frame(
@@ -567,8 +634,8 @@ if __name__ == "__main__":
     output_dir = "videos/output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    model_path: str = "models/yolov8n.pt"
-    # model_path: str = "models/yolo8n_static_quantized.onnx"
+    # model_path: str = "models/yolov8n.pt"
+    model_path: str = "models/yolo8n_static_quantized.onnx"
     frame_interval: int = 3
 
     onnx: bool = ".onnx" in model_path
