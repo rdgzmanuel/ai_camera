@@ -9,6 +9,9 @@ from types import SimpleNamespace
 from yolox.tracker.byte_tracker import BYTETracker, STrack
 from ultralytics import YOLO
 from src.quantization.onnx_detector import OnnxDetector
+from src.controller import BoxController
+from src.utils import enforce_aspect_ratio
+
 
 class PlayerTracker:
     """
@@ -40,11 +43,11 @@ class PlayerTracker:
             self.model: YOLO = YOLO(model_path).to(device)
 
         self.frame_interval: int = frame_interval
-        self.n: float = 1.75  # Scale factor for expanded box
-        self.p: float = 0.85  # Percentage of boxes to consider
+        self.n: float = 1.8 # Scale factor for expanded box
+        self.p: float = 0.8  # Percentage of boxes to consider
         self.default_fps: int = 25
         self.frame_rate: int = self.default_fps // self.frame_interval
-        self.full_frame_interval_factor: int = self.default_fps // self.frame_interval
+        self.full_frame_interval_factor: int = self.default_fps // (self.frame_interval + 10)
 
         tracker_args: dict = {
             "track_thresh": self.conf_thresh,
@@ -59,7 +62,6 @@ class PlayerTracker:
         self.aspect_ratio: Tuple[int, int] = (16, 9)
         self.target_ratio: float = self.aspect_ratio[0] / self.aspect_ratio[1]
         self.current_box_info: Optional[Tuple[float, float, float, float]] = None
-        self.max_speed: float = 7.0
 
         self.resolutions: dict[str, tuple[int, int]] = {
             "HD": (1280, 720),
@@ -72,6 +74,9 @@ class PlayerTracker:
         # Frame optimization
         self.expanded_box: Optional[Tuple[int, int, int, int]] = None  # (x1, y1, x2, y2)
         self.input_resolution: Optional[tuple[int, int]] = None  # Default model input size
+
+        # PID controller
+        self.box_controller: BoxController = BoxController(target_ratio=self.target_ratio)
 
 
     def process_video(
@@ -101,7 +106,7 @@ class PlayerTracker:
         fps_window: deque = deque(maxlen=30)
         total_start_time: float = time.time()
         total_frames: int = 0
-        box_info: Optional[Tuple[float, float, float, float]] = None
+        target_box: Optional[Tuple[float, float, float, float]] = None
 
         while True:
             ret, frame = cap.read()
@@ -116,7 +121,7 @@ class PlayerTracker:
                 # Full detection every n * frame_interval frames
                 if frame_id % (self.frame_interval * self.full_frame_interval_factor) == 0 or self.expanded_box is None:
                     detections = self.obtain_detections(frame)
-                    
+
                 else:
                     # ROI detection inside expanded box
                     ex1, ey1, ex2, ey2 = self.expanded_box
@@ -126,12 +131,7 @@ class PlayerTracker:
 
                     for d in detections:
                         x1, y1, x2, y2 = d["bbox"]
-                        d["bbox"] = (
-                            int(x1 + ex1),
-                            int(y1 + ey1),
-                            int(x2 + ex1),
-                            int(y2 + ey1)
-                        )
+                        d["bbox"] = (int(x1 + ex1), int(y1 + ey1), int(x2 + ex1), int(y2 + ey1))
 
                 # Update focus box
                 if tracking:
@@ -140,12 +140,11 @@ class PlayerTracker:
                 else:
                     focus_input = detections
 
-                box_info = self.compute_focus_box(focus_input, self.p)
+                target_box = self.compute_target_box(focus_input, self.p)
 
-
-            if box_info is not None:
-                updated_box_info = self.update_box_info(box_info)
-                tight_box, expanded_box = self.get_boxes(updated_box_info, self.n, frame.shape)
+            if target_box is not None:
+                current_box = self.update_current_box(target_box)
+                tight_box, expanded_box = self.get_boxes(current_box, self.n, frame.shape)
 
                 self.expanded_box = expanded_box
 
@@ -155,7 +154,7 @@ class PlayerTracker:
                     frame = frame[ey1:ey2, ex1:ex2]
 
                     # Optionally, resize to original resolution so all outputs are same size
-                    frame = cv2.resize(frame, self.resolution)
+                    # frame = cv2.resize(frame, self.resolution)
                 else:
                     if tracking:
                         frame = self.draw_tracks(frame, tracks)
@@ -163,13 +162,13 @@ class PlayerTracker:
                         frame = self.draw_detections(frame, detections)
 
                     frame = self.draw_boxes(frame, tight_box, expanded_box)
+            frame = cv2.resize(frame, self.resolution)
 
             frame, effective_fps, total_frames = self.compute_fps(
                 frame, fps_window, total_start_time, total_frames, frame_start
             )
 
             out.write(frame)
-            
 
             if display:
                 cv2.imshow("Tracking" if tracking else "Detection", frame)
@@ -237,8 +236,6 @@ class PlayerTracker:
         Returns:
             List of detection dictionaries.
         """
-        h, w = frame.shape[:2]
-
         if self.onnx:
             detections: list[dict] = self.model.pipeline(frame, self.conf_thresh, self.iou_thresh)
 
@@ -291,7 +288,6 @@ class PlayerTracker:
         return tracks
 
 
-
     def process_frame(
         self,
         frame: np.ndarray,
@@ -320,13 +316,8 @@ class PlayerTracker:
             ) if detections else np.empty((0, 5), dtype=np.float32)
 
         else:
-            results = self.model(
-                frame,
-                conf=self.conf_thresh,
-                iou=self.iou_thresh,
-                max_det=self.max_det,
-                verbose=False
-            )[0]
+            results = self.model(frame, conf=self.conf_thresh, iou=self.iou_thresh,
+                                 max_det=self.max_det, verbose=False)[0]
 
             det_list = []
             track_list = []
@@ -428,6 +419,7 @@ class PlayerTracker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         return frame
 
+
     def get_track_color(self, track_id: int) -> Tuple[int, int, int]:
         """
         Generates a consistent color for a track ID.
@@ -464,13 +456,9 @@ class PlayerTracker:
         } for t in tracks]
 
 
-    def compute_focus_box(
-        self,
-        detections: List[dict],
-        p: float
-    ) -> Optional[Tuple[float, float, float, float]]:
+    def compute_target_box(self, detections: list[dict], p: float) -> Optional[tuple[float, float, float, float]]:
         """
-        Computes the smallest bounding box containing p% of detections.
+        Computes and formats the smallest bounding box containing p% of detections.
 
         Args:
             detections: List of detection dictionaries.
@@ -510,51 +498,13 @@ class PlayerTracker:
         w = max_x - min_x
         h = max_y - min_y
 
-        if h == 0 or w / h > self.target_ratio:
-            h = max(1e-5, w / self.target_ratio)
-        else:
-            w = max(1e-5, h * self.target_ratio)
+        cx, cy, w, h = enforce_aspect_ratio(cx, cy, w, h, self.target_ratio)
 
         return cx, cy, w, h
 
 
-    def update_box_info(
-        self,
-        box_info: Tuple[float, float, float, float]
-    ) -> Tuple[float, float, float, float]:
-        """
-        Smoothly interpolates the box parameters toward a target box.
-
-        Args:
-            box_info: Target (cx, cy, w, h).
-
-        Returns:
-            Updated (cx, cy, w, h).
-        """
-        if self.current_box_info is None:
-            self.current_box_info = box_info
-            return box_info
-
-        updated = []
-        for cur, target in zip(self.current_box_info, box_info):
-            diff = target - cur
-            if abs(diff) <= self.max_speed:
-                new_val = target
-            else:
-                new_val = cur + np.sign(diff) * self.max_speed
-            updated.append(new_val)
-        
-        cx, cy, w, h = updated
-        target_ratio = self.aspect_ratio[0] / self.aspect_ratio[1]
-        if h == 0 or w / h > target_ratio:
-            h = max(1e-5, w / target_ratio)
-        else:
-            w = max(1e-5, h * target_ratio)
-
-        updated = (cx, cy, w, h)
-
-        self.current_box_info = updated
-        return self.current_box_info
+    def update_current_box(self, target: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        return self.box_controller.update(target)
 
 
     def get_boxes(
@@ -564,43 +514,73 @@ class PlayerTracker:
         frame_shape: Tuple[int, int, int]
     ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]:
         """
-        Computes the tight and expanded bounding boxes.
+        Computes tight and expanded bounding boxes around the focus box,
+        and ensures that the expanded box keeps the target aspect ratio exactly
+        and stays within the frame bounds by shifting, not resizing.
 
         Args:
-            box_info: (cx, cy, w, h) box parameters.
+            box_info: (cx, cy, w, h) of the focus box.
             n: Scale factor for expansion.
-            frame_shape: Shape of the frame.
+            frame_shape: Frame shape as (height, width, channels).
 
         Returns:
-            Tuple (tight_box, expanded_box), each as (x1, y1, x2, y2).
+            Tuple of (tight_box, expanded_box), each as (x1, y1, x2, y2).
         """
         cx, cy, w, h = box_info
-        height, width = frame_shape[:2]
+        frame_h, frame_w = frame_shape[:2]
 
-        tight_x1 = int(cx - w / 2)
-        tight_y1 = int(cy - h / 2)
-        tight_x2 = int(cx + w / 2)
-        tight_y2 = int(cy + h / 2)
+        tight_x1: int = int(cx - w / 2)
+        tight_y1: int = int(cy - h / 2)
+        tight_x2: int = int(cx + w / 2)
+        tight_y2: int = int(cy + h / 2)
 
-        exp_w = w * n
-        exp_h = h * n
-        exp_x1 = int(cx - exp_w / 2)
-        exp_y1 = int(cy - exp_h / 2)
-        exp_x2 = int(cx + exp_w / 2)
-        exp_y2 = int(cy + exp_h / 2)
+        exp_w: float = w * n
+        exp_h: float = h * n
 
-        # Clip to frame bounds
-        tight_x1 = max(0, tight_x1)
-        tight_y1 = max(0, tight_y1)
-        tight_x2 = min(width - 1, tight_x2)
-        tight_y2 = min(height - 1, tight_y2)
+        target_ratio: float = self.target_ratio
+        current_ratio: float = exp_w / exp_h if exp_h != 0 else 0
 
-        exp_x1 = max(0, exp_x1)
-        exp_y1 = max(0, exp_y1)
-        exp_x2 = min(width - 1, exp_x2)
-        exp_y2 = min(height - 1, exp_y2)
+        if current_ratio > target_ratio:
+            # Too wide → reduce width
+            exp_w = exp_h * target_ratio
+        else:
+            # Too tall → reduce height
+            exp_h = exp_w / target_ratio
 
-        return (tight_x1, tight_y1, tight_x2, tight_y2), (exp_x1, exp_y1, exp_x2, exp_y2)
+        # Compute top-left and bottom-right corners
+        exp_x1: int = int(cx - exp_w / 2)
+        exp_y1: int = int(cy - exp_h / 2)
+        exp_x2: int = int(cx + exp_w / 2)
+        exp_y2: int = int(cy + exp_h / 2)
+
+        shift_x: int = 0
+        shift_y: int = 0
+
+        if exp_x1 < 0:
+            shift_x = -exp_x1
+        elif exp_x2 > frame_w:
+            shift_x = frame_w - exp_x2
+
+        if exp_y1 < 0:
+            shift_y = -exp_y1
+        elif exp_y2 > frame_h:
+            shift_y = frame_h - exp_y2
+
+        exp_x1 += shift_x
+        exp_x2 += shift_x
+        exp_y1 += shift_y
+        exp_y2 += shift_y
+
+        # Final cast to int and clamp to be safe, just in case rounding pushed it out
+        exp_x1 = max(0, min(frame_w - 1, exp_x1))
+        exp_x2 = max(0, min(frame_w, exp_x2))
+        exp_y1 = max(0, min(frame_h - 1, exp_y1))
+        exp_y2 = max(0, min(frame_h, exp_y2))
+
+        return (
+            (tight_x1, tight_y1, tight_x2, tight_y2),
+            (exp_x1, exp_y1, exp_x2, exp_y2)
+        )
 
 
     def draw_boxes(
@@ -630,7 +610,7 @@ class PlayerTracker:
 
 if __name__ == "__main__":
     # input_video = "videos/soccertrack/wide_view/videos/F_20200220_1_0030_0060.mp4"
-    input_video = "videos/hqsport-clip-3.mp4"
+    input_video = "videos/hqsport-clip.mp4"
     output_dir = "videos/output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -651,7 +631,7 @@ if __name__ == "__main__":
     tracker.process_video(
         input_video,
         output_path,
-        tracking=False,
+        tracking=True,
         display=True,
-        real_output=False
+        real_output=True
     )
