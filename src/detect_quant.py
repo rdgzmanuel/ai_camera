@@ -1,7 +1,7 @@
 import os
 import time
 from collections import deque
-from typing import Optional, List, Tuple
+from typing import Optional
 import cv2
 import numpy as np
 import torch
@@ -10,7 +10,16 @@ from yolox.tracker.byte_tracker import BYTETracker, STrack
 from ultralytics import YOLO
 from src.quantization.onnx_detector import OnnxDetector
 from src.controller import BoxController
-from src.utils import enforce_aspect_ratio
+from src.utils import (
+    enforce_aspect_ratio,
+    compute_fps,
+    draw_tracks,
+    tracks_to_detections,
+    draw_boxes,
+    non_max_merge,
+    load_field_mask,
+    filter_detections_by_mask
+)
 
 
 class PlayerTracker:
@@ -23,7 +32,8 @@ class PlayerTracker:
                  device: str = "cpu",
                  frame_interval: int = 1,
                  chosen_resolution: str = "FHD",
-                 onnx: bool = False) -> None:
+                 onnx: bool = False,
+                 input_video: str = "videos/hqsport-clip-3.mp4") -> None:
         """
         Initializes the PlayerTracker.
 
@@ -47,7 +57,7 @@ class PlayerTracker:
         self.p: float = 0.8  # Percentage of boxes to consider
         self.default_fps: int = 25
         self.frame_rate: int = self.default_fps // self.frame_interval
-        self.full_frame_interval_factor: int = self.default_fps // (self.frame_interval + 10)
+        self.full_frame_interval_factor: int = self.default_fps // (self.frame_interval + 2)
 
         tracker_args: dict = {
             "track_thresh": self.conf_thresh,
@@ -59,9 +69,9 @@ class PlayerTracker:
         self.tracker: BYTETracker = BYTETracker(SimpleNamespace(**tracker_args), frame_rate=self.frame_rate)
 
         # Visualization parameters
-        self.aspect_ratio: Tuple[int, int] = (16, 9)
+        self.aspect_ratio: tuple[int, int] = (16, 9)
         self.target_ratio: float = self.aspect_ratio[0] / self.aspect_ratio[1]
-        self.current_box_info: Optional[Tuple[float, float, float, float]] = None
+        self.current_box_info: Optional[tuple[float, float, float, float]] = None
 
         self.resolutions: dict[str, tuple[int, int]] = {
             "HD": (1280, 720),
@@ -72,11 +82,16 @@ class PlayerTracker:
         self.resolution: tuple[int, int] = self.resolutions[chosen_resolution]
         
         # Frame optimization
-        self.expanded_box: Optional[Tuple[int, int, int, int]] = None  # (x1, y1, x2, y2)
+        self.expanded_box: Optional[tuple[int, int, int, int]] = None  # (x1, y1, x2, y2)
         self.input_resolution: Optional[tuple[int, int]] = None  # Default model input size
 
         # PID controller
         self.box_controller: BoxController = BoxController(target_ratio=self.target_ratio)
+
+        # Field detection
+        self.field_mask: Optional[np.ndarray] = None
+        input_video: str = input_video.split("/")[-1][:-4]
+        self.mask_path: str = f"field_coordinates/{input_video}.json"
 
 
     def process_video(
@@ -106,7 +121,7 @@ class PlayerTracker:
         fps_window: deque = deque(maxlen=30)
         total_start_time: float = time.time()
         total_frames: int = 0
-        target_box: Optional[Tuple[float, float, float, float]] = None
+        target_box: Optional[tuple[float, float, float, float]] = None
 
         while True:
             ret, frame = cap.read()
@@ -115,20 +130,22 @@ class PlayerTracker:
             if not ret:
                 break
 
+            if self.field_mask is None:
+                # Load field mask once
+                self.field_mask = load_field_mask(self.mask_path, (frame.shape[1], frame.shape[0]))
+
             frame_start: float = time.time()
 
             if frame_id % self.frame_interval == 0:
                 # Full detection every n * frame_interval frames
                 if frame_id % (self.frame_interval * self.full_frame_interval_factor) == 0 or self.expanded_box is None:
-                    detections = self.obtain_detections(frame)
+                    detections = self.process_frame_patched(frame, filter=True)
 
                 else:
                     # ROI detection inside expanded box
                     ex1, ey1, ex2, ey2 = self.expanded_box
                     roi = frame[ey1:ey2, ex1:ex2]
-                    # resized_roi = cv2.resize(roi, self.resolution)  # match model input size
-                    detections = self.obtain_detections(roi)
-
+                    detections = self.process_frame_patched(roi)
                     for d in detections:
                         x1, y1, x2, y2 = d["bbox"]
                         d["bbox"] = (int(x1 + ex1), int(y1 + ey1), int(x2 + ex1), int(y2 + ey1))
@@ -136,7 +153,7 @@ class PlayerTracker:
                 # Update focus box
                 if tracking:
                     tracks = self.obtain_tracks(frame, detections)
-                    focus_input = self.tracks_to_detections(tracks)
+                    focus_input = tracks_to_detections(tracks)
                 else:
                     focus_input = detections
 
@@ -154,17 +171,16 @@ class PlayerTracker:
                     frame = frame[ey1:ey2, ex1:ex2]
 
                     # Optionally, resize to original resolution so all outputs are same size
-                    # frame = cv2.resize(frame, self.resolution)
                 else:
                     if tracking:
-                        frame = self.draw_tracks(frame, tracks)
+                        frame = draw_tracks(frame, tracks)
                     else:
                         frame = self.draw_detections(frame, detections)
 
-                    frame = self.draw_boxes(frame, tight_box, expanded_box)
+                    frame = draw_boxes(frame, tight_box, expanded_box)
             frame = cv2.resize(frame, self.resolution)
 
-            frame, effective_fps, total_frames = self.compute_fps(
+            frame, effective_fps, total_frames = compute_fps(
                 frame, fps_window, total_start_time, total_frames, frame_start
             )
 
@@ -181,7 +197,6 @@ class PlayerTracker:
                     f"Frame {frame_id} | Overall FPS: {effective_fps:.2f}"
                 )
             frame_id += 1
-            
 
         cap.release()
         out.release()
@@ -191,39 +206,6 @@ class PlayerTracker:
         total_elapsed = time.time() - total_start_time
         final_fps = total_frames / total_elapsed
         print(f"Processed {total_frames} frames in {total_elapsed:.2f}s | Effective FPS: {final_fps:.2f}")
-
-
-    def compute_fps(
-        self,
-        frame: np.ndarray,
-        fps_window: deque,
-        total_start_time: float,
-        total_frames: int,
-        frame_start: float
-    ) -> Tuple[np.ndarray, float, float, int]:
-        """
-        Computes and overlays FPS metrics.
-
-        Args:
-            frame: Frame to annotate.
-            fps_window: Sliding window of FPS.
-            total_start_time: Start timestamp.
-            total_frames: Number of frames processed.
-            frame_start: Timestamp of frame start.
-
-        Returns:
-            Tuple (annotated frame, avg FPS, effective FPS, updated total_frames).
-        """
-        elapsed = time.time() - frame_start
-        fps_render = 1.0 / elapsed if elapsed > 0 else 0
-        fps_window.append(fps_render)
-
-        total_frames += 1
-        effective_fps = total_frames / (time.time() - total_start_time)
-
-        cv2.putText(frame, f"Overall FPS: {effective_fps:.2f}", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        return frame, effective_fps, total_frames
     
 
     def obtain_detections(self, frame: np.ndarray) -> list[dict]:
@@ -234,7 +216,7 @@ class PlayerTracker:
             frame: Input frame.
 
         Returns:
-            List of detection dictionaries.
+            list of detection dictionaries.
         """
         if self.onnx:
             detections: list[dict] = self.model.pipeline(frame, self.conf_thresh, self.iou_thresh)
@@ -269,10 +251,10 @@ class PlayerTracker:
 
         Args:
             frame: Input frame.
-            detections: List of detection dictionaries.
+            detections: list of detection dictionaries.
 
         Returns:
-            List of tracked STrack objects.
+            list of tracked STrack objects.
         """
         h, w = frame.shape[:2]
 
@@ -281,7 +263,7 @@ class PlayerTracker:
             dtype=np.float32
         ) if detections else np.empty((0, 5), dtype=np.float32)
 
-        tracks: List[STrack] = []
+        tracks: list[STrack] = []
         if tracking_input.size > 0:
             tracks = self.tracker.update(tracking_input, [h, w], [h, w])
 
@@ -301,11 +283,11 @@ class PlayerTracker:
             tracking: Whether to track objects.
 
         Returns:
-            Tuple (detections, tracks).
+            tuple (detections, tracks).
         """
         h, w = frame.shape[:2]
 
-        detections: List[dict] = []
+        detections: list[dict] = []
 
         if self.onnx:
             detections = self.model.pipeline(frame, self.conf_thresh, self.iou_thresh)
@@ -341,7 +323,7 @@ class PlayerTracker:
                 if track_list else np.empty((0, 5), dtype=np.float32)
             )
 
-        tracks: List[STrack] = []
+        tracks: list[STrack] = []
         if tracking and tracking_input.size > 0:
             tracks = self.tracker.update(tracking_input, [h, w], [h, w])
 
@@ -354,8 +336,8 @@ class PlayerTracker:
 
         Args:
             frame (np.ndarray): Frame to annotate.
-            detections (List[Dict[str, object]]): List of detection dictionaries. Each must have:
-                - 'bbox': Tuple of coordinates (x1, y1, x2, y2) or (x, y, w, h)
+            detections (list[Dict[str, object]]): list of detection dictionaries. Each must have:
+                - 'bbox': tuple of coordinates (x1, y1, x2, y2) or (x, y, w, h)
                 - 'conf': Confidence score (float)
                 - 'class': Class ID (int)
             onnx (bool): If True, interprets bbox as (x, y, w, h). Otherwise, (x1, y1, x2, y2).
@@ -399,74 +381,17 @@ class PlayerTracker:
         return frame
 
 
-    def draw_tracks(self, frame: np.ndarray, tracks: List[STrack]) -> np.ndarray:
-        """
-        Draws tracked objects on the frame.
-
-        Args:
-            frame: Frame to annotate.
-            tracks: List of STrack objects.
-
-        Returns:
-            Annotated frame.
-        """
-        for track in tracks:
-            x1, y1, w, h = map(int, track.tlwh)
-            track_id = track.track_id
-            color = self.get_track_color(track_id)
-            cv2.rectangle(frame, (x1, y1), (x1 + w, y1 + h), color, 2)
-            cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        return frame
-
-
-    def get_track_color(self, track_id: int) -> Tuple[int, int, int]:
-        """
-        Generates a consistent color for a track ID.
-
-        Args:
-            track_id: Unique track identifier.
-
-        Returns:
-            RGB color tuple.
-        """
-        np.random.seed(track_id)
-        return tuple(np.random.randint(0, 255, 3).tolist())
-
-
-    def tracks_to_detections(self, tracks: List[STrack]) -> List[dict]:
-        """
-        Converts tracked objects to detection-like dictionaries.
-
-        Args:
-            tracks: List of STrack objects.
-
-        Returns:
-            List of detection dictionaries.
-        """
-        return [{
-            "bbox": (
-                t.tlwh[0],
-                t.tlwh[1],
-                t.tlwh[0] + t.tlwh[2],
-                t.tlwh[1] + t.tlwh[3]
-            ),
-            "conf": getattr(t, "score", 1.0),
-            "class": 0
-        } for t in tracks]
-
-
     def compute_target_box(self, detections: list[dict], p: float) -> Optional[tuple[float, float, float, float]]:
         """
         Computes and formats the smallest bounding box containing p% of detections.
 
         Args:
-            detections: List of detection dictionaries.
+            detections: list of detection dictionaries.
             p: Fraction of boxes to keep (0-1).
             frame_shape: Shape of the frame (height, width, channels).
 
         Returns:
-            Tuple (cx, cy, w, h) of the focus box, or None if no detections.
+            tuple (cx, cy, w, h) of the focus box, or None if no detections.
         """
         if not detections:
             return None
@@ -509,58 +434,57 @@ class PlayerTracker:
 
     def get_boxes(
         self,
-        box_info: Tuple[float, float, float, float],
+        box_info: tuple[float, float, float, float],
         n: float,
-        frame_shape: Tuple[int, int, int]
-    ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]:
+        frame_shape: tuple[int, int, int]
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
         """
         Computes tight and expanded bounding boxes around the focus box,
-        and ensures that the expanded box keeps the target aspect ratio exactly
-        and stays within the frame bounds by shifting, not resizing.
-
-        Args:
-            box_info: (cx, cy, w, h) of the focus box.
-            n: Scale factor for expansion.
-            frame_shape: Frame shape as (height, width, channels).
-
-        Returns:
-            Tuple of (tight_box, expanded_box), each as (x1, y1, x2, y2).
+        and ensures that the expanded box keeps the target aspect ratio exactly,
+        always fits within the frame, and is only shifted — never clamped or distorted.
         """
         cx, cy, w, h = box_info
         frame_h, frame_w = frame_shape[:2]
 
-        tight_x1: int = int(cx - w / 2)
-        tight_y1: int = int(cy - h / 2)
-        tight_x2: int = int(cx + w / 2)
-        tight_y2: int = int(cy + h / 2)
+        # Tight box
+        tight_x1 = int(cx - w / 2)
+        tight_y1 = int(cy - h / 2)
+        tight_x2 = int(cx + w / 2)
+        tight_y2 = int(cy + h / 2)
 
-        exp_w: float = w * n
-        exp_h: float = h * n
+        # Expand
+        exp_w = w * n
+        exp_h = h * n
 
-        target_ratio: float = self.target_ratio
-        current_ratio: float = exp_w / exp_h if exp_h != 0 else 0
-
-        if current_ratio > target_ratio:
-            # Too wide → reduce width
+        # Adjust to target aspect ratio
+        target_ratio = self.target_ratio
+        if exp_w / exp_h > target_ratio:
             exp_w = exp_h * target_ratio
         else:
-            # Too tall → reduce height
             exp_h = exp_w / target_ratio
 
-        # Compute top-left and bottom-right corners
-        exp_x1: int = int(cx - exp_w / 2)
-        exp_y1: int = int(cy - exp_h / 2)
-        exp_x2: int = int(cx + exp_w / 2)
-        exp_y2: int = int(cy + exp_h / 2)
+        # Ensure it fits in frame — scale down if needed
+        max_w = min(frame_w, frame_h * target_ratio)
+        max_h = min(frame_h, frame_w / target_ratio)
 
-        shift_x: int = 0
-        shift_y: int = 0
+        if exp_w > max_w or exp_h > max_h:
+            scale = min(max_w / exp_w, max_h / exp_h)
+            exp_w *= scale
+            exp_h *= scale
 
+        # Position the box centered at (cx, cy)
+        exp_x1 = int(round(cx - exp_w / 2))
+        exp_y1 = int(round(cy - exp_h / 2))
+        exp_x2 = int(round(cx + exp_w / 2))
+        exp_y2 = int(round(cy + exp_h / 2))
+
+        # Shift if needed to keep inside frame
+        shift_x = 0
+        shift_y = 0
         if exp_x1 < 0:
             shift_x = -exp_x1
         elif exp_x2 > frame_w:
             shift_x = frame_w - exp_x2
-
         if exp_y1 < 0:
             shift_y = -exp_y1
         elif exp_y2 > frame_h:
@@ -571,41 +495,80 @@ class PlayerTracker:
         exp_y1 += shift_y
         exp_y2 += shift_y
 
-        # Final cast to int and clamp to be safe, just in case rounding pushed it out
-        exp_x1 = max(0, min(frame_w - 1, exp_x1))
-        exp_x2 = max(0, min(frame_w, exp_x2))
-        exp_y1 = max(0, min(frame_h - 1, exp_y1))
-        exp_y2 = max(0, min(frame_h, exp_y2))
-
         return (
             (tight_x1, tight_y1, tight_x2, tight_y2),
             (exp_x1, exp_y1, exp_x2, exp_y2)
         )
 
+    
 
-    def draw_boxes(
+    def process_frame_patched(
         self,
         frame: np.ndarray,
-        tight_box: Tuple[int, int, int, int],
-        expanded_box: Tuple[int, int, int, int]
-    ) -> np.ndarray:
+        max_patch_aspect_ratio: float = 2.0,
+        overlap_ratio: float = 0.2,
+        max_patches: int = 4,
+        filter=False
+    ) -> list[dict]:
         """
-        Draws the tight and expanded boxes on the frame.
+        Process frame by checking its aspect ratio and optionally splitting into overlapping patches.
 
         Args:
-            frame: Frame to annotate.
-            tight_box: Coordinates (x1, y1, x2, y2).
-            expanded_box: Coordinates (x1, y1, x2, y2).
+            frame: The input frame.
+            max_patch_aspect_ratio: If frame width/height exceeds this, patching is triggered.
+            overlap_ratio: Overlap between patches (0 to 1).
+            max_patches: Maximum number of patches allowed (defaults to 2).
 
         Returns:
-            Annotated frame.
+            A merged list of deduplicated detections.
         """
-        tx1, ty1, tx2, ty2 = tight_box
-        ex1, ey1, ex2, ey2 = expanded_box
+        h, w = frame.shape[:2]
+        aspect_ratio: float = w / h
 
-        cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), (255, 0, 0), 2)
-        cv2.rectangle(frame, (ex1, ey1), (ex2, ey2), (0, 0, 255), 2)
-        return frame
+        if aspect_ratio <= max_patch_aspect_ratio:
+            detections = self.obtain_detections(frame)
+        
+        else:
+            # Calculate initial patch width based on near-square target ratio
+            target_patch_ratio = 1.2
+            initial_patch_w = int(h * target_patch_ratio)
+
+            # Recompute patch width to not exceed max_patches
+            effective_patch_w = max(initial_patch_w, int(w / max_patches))
+            step = int(effective_patch_w * (1 - overlap_ratio))
+
+            coords = []
+            x = 0
+            while x + effective_patch_w < w:
+                coords.append(x)
+                x += step
+
+            # Always ensure final patch covers right edge
+            if not coords or coords[-1] + effective_patch_w < w:
+                coords.append(w - effective_patch_w)
+
+            # Truncate to max_patches if necessary
+            if len(coords) > max_patches:
+                step = (w - effective_patch_w) // (max_patches - 1)
+                coords = [i * step for i in range(max_patches - 1)] + [w - effective_patch_w]
+
+            all_detections = []
+            for x_offset in coords:
+                patch = frame[:, x_offset:x_offset + effective_patch_w]
+                detections = self.obtain_detections(patch)
+
+                for d in detections:
+                    x1, y1, x2, y2 = d["bbox"]
+                    d["bbox"] = (x1 + x_offset, y1, x2 + x_offset, y2)
+                    all_detections.append(d)
+            
+            detections: list[dict] = non_max_merge(all_detections, iou_thresh=0.5)
+
+        if filter:
+            print("mask shape:", self.field_mask.shape)
+            detections = filter_detections_by_mask(detections, self.field_mask)
+
+        return detections
 
 
 if __name__ == "__main__":
@@ -624,14 +587,16 @@ if __name__ == "__main__":
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
         frame_interval=frame_interval,
-        onnx=onnx
+        onnx=onnx,
+        chosen_resolution="HD",
+        input_video=input_video
     )
 
     output_path = os.path.join(output_dir, "output_tracking.mp4")
     tracker.process_video(
         input_video,
         output_path,
-        tracking=True,
+        tracking=False,
         display=True,
-        real_output=True
+        real_output=False
     )

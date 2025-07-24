@@ -81,10 +81,10 @@ class BoxController:
     def __init__(
         self,
         target_ratio: float,
-        kp: float = 0.01,
+        kp: float = 0.02,
         ki: float = 0.0075,
         kd: float = 0.03,
-        max_speed: float = 1.5
+        max_speed: float = 1.0
     ) -> None:
         """
         Initializes the BoxController with PID controllers for each component.
