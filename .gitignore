@@ -14,3 +14,6 @@
 
 # Keys
 /src/config.py
+
+# Cache
+/src/__pycache__
