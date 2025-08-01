@@ -9,3 +9,8 @@
 
 /roboflow
 /field_coordinates
+
+/commentary
+
+# Keys
+/src/config.py
