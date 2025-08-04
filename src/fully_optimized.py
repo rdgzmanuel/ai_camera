@@ -10,7 +10,6 @@ from yolox.tracker.byte_tracker import BYTETracker, STrack
 from ultralytics import YOLO
 from src.quantization.onnx_detector import OnnxDetector
 from src.adaptive_resolution import AdaptiveResolutionDetector
-from src.predictive_roi_processor import PredictiveROIProcessor
 from src.optical_flow import OpticalFlow
 from src.controller import BoxController
 from src.utils import (
@@ -99,18 +98,16 @@ class OptimizedPlayerTracker:
         # === OPTIMIZATION COMPONENTS ===
         
         # 1. Adaptive Resolution
-        self.adaptive_detector = AdaptiveResolutionDetector(self.model)
+        self.adaptive_detector: AdaptiveResolutionDetector = AdaptiveResolutionDetector(self.model)
+        self.last_inference_time: float = 0.0
+        self.adaptive_used_this_frame: bool = False
         
-        # 2. Smart ROI
-        self.roi_processor = None
-        
-        # 3. Optical Flow
+        # 2. Optical Flow
         self.optical_flow: OpticalFlow = OpticalFlow()
         
         # === OPTIMIZATION SETTINGS ===
-        self.use_optical_flow = True
-        self.use_smart_roi = False
-        self.use_adaptive_resolution = False
+        self.use_optical_flow: bool = True
+        self.use_adaptive_resolution: bool = False
         
         # Performance parameters
         self.full_detection_interval = 5  # Run full detection every N frames
@@ -120,7 +117,6 @@ class OptimizedPlayerTracker:
 
         print(f"Initialized OptimizedPlayerTracker with:")
         print(f"  Optical Flow: {self.use_optical_flow}")
-        print(f"  Smart ROI: {self.use_smart_roi}")
         print(f"  Adaptive Resolution: {self.use_adaptive_resolution}")
 
 
@@ -128,9 +124,19 @@ class OptimizedPlayerTracker:
         """
         Runs detection on a frame and returns the results.
         """
-        if self.onnx:
-            detections: list[dict] = self.model.pipeline(frame, self.conf_thresh, self.iou_thresh)
+        if self.use_adaptive_resolution:
+            detections, inference_time = self.adaptive_detector.detect_with_adaptive_resolution(
+                frame, self.conf_thresh, self.iou_thresh
+            )
+            self.last_inference_time = inference_time
+            self.adaptive_used_this_frame = True
+            return detections
 
+        self.adaptive_used_this_frame = False
+        start_time = time.time()
+
+        if self.onnx:
+            detections = self.model.pipeline(frame, self.conf_thresh, self.iou_thresh)
         else:
             results = self.model(
                 frame,
@@ -152,6 +158,8 @@ class OptimizedPlayerTracker:
                         "conf": conf,
                         "class": cls
                     })
+        
+        self.last_inference_time = time.time() - start_time
         return detections
 
 
@@ -188,65 +196,6 @@ class OptimizedPlayerTracker:
         return self.optical_flow.propagate_detections_simple(gray_frame)
 
 
-    # === SMART ROI METHODS ===
-    
-    def process_frame_with_smart_roi(self, frame: np.ndarray) -> List[Dict]:
-        """
-        Process frame using smart ROI with previous detection context.
-        """
-        if not hasattr(self, 'roi_processor') or self.roi_processor is None:
-            return self.obtain_detections(frame)
-        
-        # Use previous detections to create focused ROIs
-        predicted_boxes = []
-        if self.prev_detections:
-            for det in self.prev_detections:
-                x1, y1, x2, y2 = det["bbox"]
-                # Expand the box slightly for ROI
-                w, h = x2 - x1, y2 - y1
-                expansion = 0.3
-                exp_x1 = max(0, int(x1 - w * expansion))
-                exp_y1 = max(0, int(y1 - h * expansion))
-                exp_x2 = min(frame.shape[1], int(x2 + w * expansion))
-                exp_y2 = min(frame.shape[0], int(y2 + h * expansion))
-                predicted_boxes.append((exp_x1, exp_y1, exp_x2, exp_y2))
-        
-        # Create ROIs
-        smart_rois = self.roi_processor.cluster_boxes_to_rois(predicted_boxes, max_rois=3)
-        
-        all_detections = []
-        
-        # Process each ROI
-        for roi_x1, roi_y1, roi_x2, roi_y2 in smart_rois:
-            # Ensure ROI is valid
-            if roi_x2 <= roi_x1 or roi_y2 <= roi_y1:
-                continue
-                
-            roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
-            roi_detections = self.obtain_detections(roi)
-            
-            # Adjust coordinates back to full frame
-            for det in roi_detections:
-                x1, y1, x2, y2 = det["bbox"]
-                det["bbox"] = (x1 + roi_x1, y1 + roi_y1, x2 + roi_x1, y2 + roi_y1)
-                all_detections.append(det)
-        
-        # If no ROIs or no detections, fall back to full frame with lower resolution
-        if not all_detections:
-            # Quick full-frame detection at lower resolution
-            h, w = frame.shape[:2]
-            scale = 0.5
-            small_frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-            detections = self.obtain_detections(small_frame)
-            
-            # Scale back up
-            for det in detections:
-                x1, y1, x2, y2 = det["bbox"]
-                det["bbox"] = (x1/scale, y1/scale, x2/scale, y2/scale)
-                all_detections.append(det)
-        
-        return all_detections
-
     # === COMBINED OPTIMIZATION METHOD ===
     def process_frame_fully_optimized(self, frame: np.ndarray) -> Tuple[List[Dict], Dict]:
         """
@@ -279,9 +228,10 @@ class OptimizedPlayerTracker:
         
         if should_full_detect:
             # Full YOLO detection
-            start_time = time.time()
             detections = self.obtain_detections(frame)
-            stats["inference_time"] = time.time() - start_time
+            stats["inference_time"] = self.last_inference_time
+            stats["used_adaptive_resolution"] = self.adaptive_used_this_frame
+
             
             # Update optical flow state
             self.optical_flow.prev_detections = detections.copy()
@@ -298,9 +248,10 @@ class OptimizedPlayerTracker:
                 stats["used_optical_flow"] = True
             else:
                 # Fallback to full detection if propagation fails
-                start_time = time.time()
                 detections = self.obtain_detections(frame)
-                stats["inference_time"] = time.time() - start_time
+                stats["inference_time"] = self.last_inference_time
+                stats["used_adaptive_resolution"] = self.adaptive_used_this_frame
+
                 stats["used_full_detection"] = True
                 self.frames_since_full_detection = 0
                 
@@ -408,7 +359,6 @@ class OptimizedPlayerTracker:
         optimization_stats: dict = {
             "full_detections": 0,
             "optical_flow_frames": 0,
-            "smart_roi_frames": 0,
             "adaptive_resolution_frames": 0,
             "total_inference_time": 0.0,
             "motion_magnitudes": []
@@ -419,7 +369,6 @@ class OptimizedPlayerTracker:
         print(f"Output: {output_path}")
         print(f"Optimizations enabled:")
         print(f" - Optical Flow: {self.use_optical_flow}")
-        print(f" - Smart ROI: {self.use_smart_roi}")
         print(f" - Adaptive Resolution: {self.use_adaptive_resolution}")
 
         while True:
@@ -444,8 +393,6 @@ class OptimizedPlayerTracker:
                 optimization_stats["full_detections"] += 1
             if frame_stats["used_optical_flow"]:
                 optimization_stats["optical_flow_frames"] += 1
-            if frame_stats["used_smart_roi"]:
-                optimization_stats["smart_roi_frames"] += 1
             if frame_stats["used_adaptive_resolution"]:
                 optimization_stats["adaptive_resolution_frames"] += 1
             
@@ -466,10 +413,6 @@ class OptimizedPlayerTracker:
 
             if focus_input:
                 target_box = compute_target_box(focus_input, self.p, self.target_ratio)
-
-            # Update ROI processor with tracks
-            if self.roi_processor and tracks:
-                self.roi_processor.update_player_velocities(tracks)
 
             # Draw results
             if target_box is not None:
@@ -508,8 +451,6 @@ class OptimizedPlayerTracker:
                     info_lines.append("Mode: Full Detection")
             elif frame_stats["used_optical_flow"]:
                 info_lines.append("Mode: Optical Flow")
-            elif frame_stats["used_smart_roi"]:
-                info_lines.append("Mode: Smart ROI")
             else:
                 info_lines.append("Mode: Standard")
 
@@ -552,7 +493,6 @@ class OptimizedPlayerTracker:
         total_processed = frame_id
         
         compute_savings = (optimization_stats["optical_flow_frames"] / max(1, total_processed)) * 100
-        roi_usage = (optimization_stats["smart_roi_frames"] / max(1, total_processed)) * 100
         adaptive_usage = (optimization_stats["adaptive_resolution_frames"] / max(1, total_processed)) * 100
 
         print(f"\n{'='*50}")
@@ -565,7 +505,6 @@ class OptimizedPlayerTracker:
         print(f"Detection Method Usage:")
         print(f"  Full detections: {optimization_stats['full_detections']} ({optimization_stats['full_detections']/total_processed*100:.1f}%)")
         print(f"  Optical flow frames: {optimization_stats['optical_flow_frames']} ({compute_savings:.1f}%)")
-        print(f"  Smart ROI frames: {optimization_stats['smart_roi_frames']} ({roi_usage:.1f}%)")
         print(f"")
         print(f"Feature Usage:")
         print(f"  Adaptive resolution: {optimization_stats['adaptive_resolution_frames']} frames ({adaptive_usage:.1f}%)")
@@ -598,7 +537,6 @@ def create_optimized_tracker(model_path: str, **kwargs) -> OptimizedPlayerTracke
     
     # Enable all optimizations by default
     tracker.use_optical_flow = True
-    tracker.use_smart_roi = False  
     tracker.use_adaptive_resolution = False
     
     # Optimize parameters for performance
@@ -639,5 +577,5 @@ if __name__ == "__main__":
         output_path,
         tracking=False,
         display=True,
-        real_output=True
+        real_output=False
     )
