@@ -42,7 +42,7 @@ class PlayerTracker:
             device: Device to run inference on ('cpu' or 'cuda').
         """
         self.device: str = device
-        self.conf_thresh: float = 0.15
+        self.conf_thresh: float = 0.3
         self.iou_thresh: float = 0.1
         self.max_det: int = 300
         self.onnx: bool = onnx
@@ -170,7 +170,6 @@ class PlayerTracker:
                     ex1, ey1, ex2, ey2 = expanded_box
                     frame = frame[ey1:ey2, ex1:ex2]
 
-                    # Optionally, resize to original resolution so all outputs are same size
                 else:
                     if tracking:
                         frame = draw_tracks(frame, tracks)
@@ -577,8 +576,8 @@ if __name__ == "__main__":
     output_dir = "videos/output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    # model_path: str = "models/yolov8n.pt"
-    model_path: str = "models/yolo8n_static_quantized.onnx"
+    model_path: str = "models/yolov8n.pt"
+    # model_path: str = "models/yolo8n_static_quantized.onnx"
     frame_interval: int = 3
 
     onnx: bool = ".onnx" in model_path
@@ -588,7 +587,7 @@ if __name__ == "__main__":
         device="cuda" if torch.cuda.is_available() else "cpu",
         frame_interval=frame_interval,
         onnx=onnx,
-        chosen_resolution="HD",
+        chosen_resolution="FHD",
         input_video=input_video
     )
 

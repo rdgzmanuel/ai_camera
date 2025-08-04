@@ -4,6 +4,7 @@ import cv2
 import os
 import json
 from collections import deque
+from typing import Optional
 from yolox.tracker.byte_tracker import STrack
 
 
@@ -237,3 +238,146 @@ def filter_detections_by_mask(detections: list, mask: np.ndarray) -> list:
         if 0 <= cx < mask.shape[1] and 0 <= cy < mask.shape[0] and mask[cy, cx]:
             filtered.append(det)
     return filtered
+
+
+def draw_detections(frame: np.ndarray, detections: list[dict[str, object]]) -> np.ndarray:
+    """
+    Draws detection boxes on the frame.
+    """
+    for det in detections:
+        x1, y1, x2, y2 = map(int, det["bbox"])
+        conf: float = float(det["conf"])
+        cls: int = int(det["class"])
+        
+        # Different colors for propagated vs detected
+        if det.get("propagated", False):
+            color = (255, 165, 0)  # Orange for propagated
+        else:
+            color = (0, 255, 0) if cls == 0 else (0, 0, 255)  # Green for fresh detections
+
+        label: str = f'Player {conf:.2f}'
+        if det.get("propagated", False):
+            label += " (tracked)"
+
+        # Draw rectangle
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # Prepare label background
+        (label_width, label_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        label_x = x1
+        label_y = y1 - 10 if y1 - 10 > label_height else y1 + 10
+
+        cv2.rectangle(frame, (label_x, label_y - label_height), (label_x + label_width, label_y + label_height), color, cv2.FILLED)
+        cv2.putText(
+            frame,
+            label,
+            (label_x, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA
+        )
+
+    return frame
+
+
+def compute_target_box(detections: list[dict], p: float, target_ratio: float) -> Optional[tuple[float, float, float, float]]:
+        """
+        Computes and formats the smallest bounding box containing p% of detections.
+        """
+        if not detections:
+            return None
+
+        boxes = [d["bbox"] for d in detections]
+        target_num = max(1, int(len(boxes) * p))
+        indices = list(range(len(boxes)))
+
+        while len(indices) > target_num:
+            best_area = None
+            best_idx = None
+            for idx in indices:
+                test = [i for i in indices if i != idx]
+                xs = [boxes[i][0] for i in test] + [boxes[i][2] for i in test]
+                ys = [boxes[i][1] for i in test] + [boxes[i][3] for i in test]
+                area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+                if best_area is None or area < best_area:
+                    best_area = area
+                    best_idx = idx
+            indices.remove(best_idx)
+
+        xs = [boxes[i][0] for i in indices] + [boxes[i][2] for i in indices]
+        ys = [boxes[i][1] for i in indices] + [boxes[i][3] for i in indices]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        cx = (min_x + max_x) / 2
+        cy = (min_y + max_y) / 2
+        w = max_x - min_x
+        h = max_y - min_y
+
+        cx, cy, w, h = enforce_aspect_ratio(cx, cy, w, h, target_ratio)
+
+        return cx, cy, w, h
+
+
+def get_boxes(box_info: tuple[float, float, float, float], n: float, frame_shape: tuple[int, int, int],
+                  target_ratio: float) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+        """
+        Computes tight and expanded bounding boxes around the focus box.
+        """
+        cx, cy, w, h = box_info
+        frame_h, frame_w = frame_shape[:2]
+
+        # Tight box
+        tight_x1 = int(cx - w / 2)
+        tight_y1 = int(cy - h / 2)
+        tight_x2 = int(cx + w / 2)
+        tight_y2 = int(cy + h / 2)
+
+        # Expand
+        exp_w = w * n
+        exp_h = h * n
+
+        # Adjust to target aspect ratio
+        if exp_w / exp_h > target_ratio:
+            exp_w = exp_h * target_ratio
+        else:
+            exp_h = exp_w / target_ratio
+
+        # Ensure it fits in frame — scale down if needed
+        max_w = min(frame_w, frame_h * target_ratio)
+        max_h = min(frame_h, frame_w / target_ratio)
+
+        if exp_w > max_w or exp_h > max_h:
+            scale = min(max_w / exp_w, max_h / exp_h)
+            exp_w *= scale
+            exp_h *= scale
+
+        # Position the box centered at (cx, cy)
+        exp_x1 = int(round(cx - exp_w / 2))
+        exp_y1 = int(round(cy - exp_h / 2))
+        exp_x2 = int(round(cx + exp_w / 2))
+        exp_y2 = int(round(cy + exp_h / 2))
+
+        # Shift if needed to keep inside frame
+        shift_x = 0
+        shift_y = 0
+        if exp_x1 < 0:
+            shift_x = -exp_x1
+        elif exp_x2 > frame_w:
+            shift_x = frame_w - exp_x2
+        if exp_y1 < 0:
+            shift_y = -exp_y1
+        elif exp_y2 > frame_h:
+            shift_y = frame_h - exp_y2
+
+        exp_x1 += shift_x
+        exp_x2 += shift_x
+        exp_y1 += shift_y
+        exp_y2 += shift_y
+
+        return (
+            (tight_x1, tight_y1, tight_x2, tight_y2),
+            (exp_x1, exp_y1, exp_x2, exp_y2)
+        )
