@@ -28,10 +28,9 @@ from src.utils import (
 
 class OptimizedPlayerTracker:
     """
-    A class for detecting and tracking players with all three optimizations:
+    A class for detecting and tracking players with optimizations:
     1. Optical Flow tracking between detections
     2. Adaptive Resolution scaling 
-    3. Smart ROI processing
     """
 
     def __init__(self, model_path: str,
@@ -39,7 +38,7 @@ class OptimizedPlayerTracker:
                  frame_interval: int = 1,
                  chosen_resolution: str = "FHD",
                  onnx: bool = False,
-                 input_video: str = "videos/hqsport-clip-3.mp4") -> None:
+                 input_video: str = "videos/hqsport-clip.mp4") -> None:
         """
         Initializes the OptimizedPlayerTracker.
         """
@@ -55,11 +54,10 @@ class OptimizedPlayerTracker:
             self.model: YOLO = YOLO(model_path).to(device)
 
         self.frame_interval: int = frame_interval
-        self.n: float = 1.8 # Scale factor for expanded box
-        self.p: float = 0.8  # Percentage of boxes to consider
+        self.n: float = 1.8
+        self.p: float = 0.8
         self.default_fps: int = 25
         self.frame_rate: int = self.default_fps // self.frame_interval
-        self.full_frame_interval_factor: int = self.default_fps // (self.frame_interval + 2)
 
         tracker_args: dict = {
             "track_thresh": self.conf_thresh,
@@ -95,7 +93,12 @@ class OptimizedPlayerTracker:
         input_video: str = input_video.split("/")[-1][:-4]
         self.mask_path: str = f"field_coordinates/{input_video}.json"
         
-        # === OPTIMIZATION COMPONENTS ===
+        # Patch processing
+        self.prev_patch_grays: dict = {}
+        self.prev_patch_detections: dict = {}
+        self.prev_patch_centers: dict = {}
+        self.prev_gray_full_frame = None
+        self.coordinates = None
         
         # 1. Adaptive Resolution
         self.adaptive_detector: AdaptiveResolutionDetector = AdaptiveResolutionDetector(self.model)
@@ -107,13 +110,13 @@ class OptimizedPlayerTracker:
         
         # === OPTIMIZATION SETTINGS ===
         self.use_optical_flow: bool = True
-        self.use_adaptive_resolution: bool = False
+        self.use_adaptive_resolution: bool = True
         
         # Performance parameters
-        self.full_detection_interval = 5  # Run full detection every N frames
-        self.max_detection_interval = 12  # Maximum frames between detections
-        self.motion_threshold = 30.0  # Pixel movement threshold
-        self.low_confidence_threshold = 0.25  # Re-detect if confidence drops
+        self.full_detection_interval: int = frame_interval  # Run full detection every N frames
+        self.max_detection_interval: int = 12  # Maximum frames between detections
+        self.motion_threshold: float = 30.0  # Pixel movement threshold
+        self.low_confidence_threshold: float = 0.25  # Re-detect if confidence drops
 
         print(f"Initialized OptimizedPlayerTracker with:")
         print(f"  Optical Flow: {self.use_optical_flow}")
@@ -180,10 +183,10 @@ class OptimizedPlayerTracker:
 
         return tracks
 
-    # === OPTICAL FLOW METHODS ===
-    def estimate_motion_complexity(self, gray_frame: np.ndarray) -> float:
+
+    def estimate_motion_complexity(self, gray_frame: np.ndarray, prev_gray_full_frame: np.ndarray) -> float:
         """Use the optimized motion estimation"""
-        return self.optical_flow.estimate_motion_complexity_fast(gray_frame)
+        return self.optical_flow.estimate_motion_complexity(gray_frame, prev_gray_full_frame)
     
 
     def extract_detection_keypoints(self, detections: List[Dict]) -> List[Tuple[float, float]]:
@@ -193,18 +196,157 @@ class OptimizedPlayerTracker:
 
     def propagate_detections_with_flow(self, gray_frame: np.ndarray) -> List[Dict]:
         """Use the optimized propagation method"""
-        return self.optical_flow.propagate_detections_simple(gray_frame)
+        return self.optical_flow.propagate_detections(gray_frame)
+    
+
+    def process_frame_combined(
+        self,
+        frame: np.ndarray,
+        max_patch_aspect_ratio: float = 2.0,
+        overlap_ratio: float = 0.2,
+        max_patches: int = 4,
+        filter: bool = False
+    ) -> Tuple[List[Dict], Dict]:
+        """
+        Combined frame processing:
+        - Determines whether to split frame based on aspect ratio.
+        - Uses full detection or optical flow per region.
+        """
+        stats = {
+            "used_full_detection": False,
+            "used_optical_flow": False,
+            "used_adaptive_resolution": False,
+            "inference_time": 0.0,
+            "total_detections": 0,
+            "motion_magnitude": 0.0,
+            "used_patching": False,
+            "num_patches": 1
+        }
+
+        h, w = frame.shape[:2]
+        aspect_ratio: float = w / h
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        motion_magnitude = self.estimate_motion_complexity(gray_frame)
+        stats["motion_magnitude"] = motion_magnitude
+
+        detections = []
+
+        if aspect_ratio <= max_patch_aspect_ratio:
+            should_full_detect = (
+                self.optical_flow.prev_gray is None or
+                not self.optical_flow.prev_detections or
+                self.frames_since_full_detection >= self.max_detection_interval or
+                (self.frames_since_full_detection >= self.full_detection_interval and
+                motion_magnitude > self.motion_threshold)
+            )
+
+            if should_full_detect:
+                detections = self.obtain_detections(frame)
+                stats["inference_time"] = self.last_inference_time
+                stats["used_adaptive_resolution"] = self.adaptive_used_this_frame
+                stats["used_full_detection"] = True
+                self.frames_since_full_detection = 0
+
+                self.optical_flow.prev_detections = detections.copy()
+                self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(detections)
+
+            else:
+                detections = self.optical_flow.propagate_detections(gray_frame)
+                if detections:
+                    stats["used_optical_flow"] = True
+                    self.frames_since_full_detection += 1
+                else:
+                    detections = self.obtain_detections(frame)
+                    stats["inference_time"] = self.last_inference_time
+                    stats["used_adaptive_resolution"] = self.adaptive_used_this_frame
+                    stats["used_full_detection"] = True
+                    self.frames_since_full_detection = 0
+
+                    self.optical_flow.prev_detections = detections.copy()
+                    self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(detections)
+
+        else:
+            stats["used_patching"] = True
+            target_patch_ratio: float = 1.2
+            initial_patch_w: int = int(h * target_patch_ratio)
+            effective_patch_w = max(initial_patch_w, int(w / max_patches))
+            step = int(effective_patch_w * (1 - overlap_ratio))
+
+            coords = []
+            x = 0
+            while x + effective_patch_w < w:
+                coords.append(x)
+                x += step
+
+            if not coords or coords[-1] + effective_patch_w < w:
+                coords.append(w - effective_patch_w)
+
+            if len(coords) > max_patches:
+                step = (w - effective_patch_w) // (max_patches - 1)
+                coords = [i * step for i in range(max_patches - 1)] + [w - effective_patch_w]
+
+            all_detections = []
+            stats["num_patches"] = len(coords)
+
+            for x_offset in coords:
+                patch = frame[:, x_offset:x_offset + effective_patch_w]
+                patch_gray = gray_frame[:, x_offset:x_offset + effective_patch_w]
+
+                should_full_detect = (
+                    self.optical_flow.prev_gray is None or
+                    not self.optical_flow.prev_detections or
+                    self.frames_since_full_detection >= self.max_detection_interval or
+                    (self.frames_since_full_detection >= self.full_detection_interval and
+                    motion_magnitude > self.motion_threshold)
+                )
+
+                if should_full_detect:
+                    patch_detections = self.obtain_detections(patch)
+                    stats["used_full_detection"] = True
+                    stats["inference_time"] += self.last_inference_time
+                    stats["used_adaptive_resolution"] |= self.adaptive_used_this_frame
+                    self.frames_since_full_detection = 0
+
+                    self.optical_flow.prev_detections = patch_detections.copy()
+                    self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(patch_detections)
+                else:
+                    patch_detections = self.optical_flow.propagate_detections(patch_gray)
+                    if patch_detections:
+                        stats["used_optical_flow"] = True
+                        self.frames_since_full_detection += 1
+                    else:
+                        patch_detections = self.obtain_detections(patch)
+                        stats["used_full_detection"] = True
+                        stats["inference_time"] += self.last_inference_time
+                        stats["used_adaptive_resolution"] |= self.adaptive_used_this_frame
+                        self.frames_since_full_detection = 0
+
+                        self.optical_flow.prev_detections = patch_detections.copy()
+                        self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(patch_detections)
+
+                for d in patch_detections:
+                    x1, y1, x2, y2 = d["bbox"]
+                    d["bbox"] = (x1 + x_offset, y1, x2 + x_offset, y2)
+                    all_detections.append(d)
+
+            detections = non_max_merge(all_detections, iou_thresh=0.5)
+
+        if filter and self.field_mask is not None:
+            detections = filter_detections_by_mask(detections, self.field_mask)
+
+        self.optical_flow.prev_gray = gray_frame.copy()
+        stats["total_detections"] = len(detections)
+        return detections, stats
 
 
-    # === COMBINED OPTIMIZATION METHOD ===
-    def process_frame_fully_optimized(self, frame: np.ndarray) -> Tuple[List[Dict], Dict]:
+
+    def process_frame(self, frame: np.ndarray) -> Tuple[List[Dict], Dict]:
         """
         Simplified optimization focusing only on optical flow
         """
         stats = {
             "used_full_detection": False,
             "used_optical_flow": False,
-            "used_smart_roi": False,
             "used_adaptive_resolution": False,
             "inference_time": 0.0,
             "total_detections": 0,
@@ -212,7 +354,7 @@ class OptimizedPlayerTracker:
         }
         
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
+
         # Fast motion estimation
         motion_magnitude = self.estimate_motion_complexity(gray_frame)
         stats["motion_magnitude"] = motion_magnitude
@@ -241,11 +383,11 @@ class OptimizedPlayerTracker:
             stats["used_full_detection"] = True
             
         else:
-            # Try optical flow propagation
-            detections = self.optical_flow.propagate_detections_simple(gray_frame)
+            detections = self.optical_flow.propagate_detections(gray_frame)
             
             if detections:
-                stats["used_optical_flow"] = True
+                stats["used_optical_flow"] = False
+                self.frames_since_full_detection += 1
             else:
                 # Fallback to full detection if propagation fails
                 detections = self.obtain_detections(frame)
@@ -258,8 +400,6 @@ class OptimizedPlayerTracker:
                 # Update optical flow state
                 self.optical_flow.prev_detections = detections.copy()
                 self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(detections)
-            
-            self.frames_since_full_detection += 1
         
         # Update previous frame for next iteration
         self.optical_flow.prev_gray = gray_frame.copy()
@@ -290,11 +430,9 @@ class OptimizedPlayerTracker:
             detections = self.obtain_detections(frame)
         
         else:
-            # Calculate initial patch width based on near-square target ratio
-            target_patch_ratio = 1.2
-            initial_patch_w = int(h * target_patch_ratio)
+            target_patch_ratio: float = 1.2
+            initial_patch_w: int = int(h * target_patch_ratio)
 
-            # Recompute patch width to not exceed max_patches
             effective_patch_w = max(initial_patch_w, int(w / max_patches))
             step = int(effective_patch_w * (1 - overlap_ratio))
 
@@ -308,7 +446,6 @@ class OptimizedPlayerTracker:
             if not coords or coords[-1] + effective_patch_w < w:
                 coords.append(w - effective_patch_w)
 
-            # Truncate to max_patches if necessary
             if len(coords) > max_patches:
                 step = (w - effective_patch_w) // (max_patches - 1)
                 coords = [i * step for i in range(max_patches - 1)] + [w - effective_patch_w]
@@ -329,10 +466,187 @@ class OptimizedPlayerTracker:
             detections = filter_detections_by_mask(detections, self.field_mask)
 
         return detections
-
-    # === MAIN PROCESSING METHOD ===
     
-    def process_video_optimized(
+
+    def process_frame_combined_with_patch_flow(
+        self,
+        frame: np.ndarray,
+        max_patch_aspect_ratio: float = 2.0,
+        overlap_ratio: float = 0.2,
+        max_patches: int = 3,
+        filter: bool = False
+    ) -> Tuple[List[Dict], Dict]:
+        """
+        Combined processing with patch-aware optical flow tracking.
+        Maintains per-patch grayscale history to support optical flow.
+        """
+        stats = {
+            "used_full_detection": False,
+            "used_optical_flow": False,
+            "used_adaptive_resolution": False,
+            "inference_time": 0.0,
+            "total_detections": 0,
+            "motion_magnitude": 0.0,
+            "used_patching": False,
+            "num_patches": 1
+        }
+
+        if not hasattr(self, "prev_patch_grays"):
+            self.prev_patch_grays = {}
+            self.prev_patch_detections = {}
+            self.prev_patch_centers = {}
+
+        h, w = frame.shape[:2]
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        motion_magnitude = self.estimate_motion_complexity(gray_frame, self.prev_gray_full_frame)
+        stats["motion_magnitude"] = motion_magnitude
+
+        aspect_ratio = w / h
+        all_detections = []
+
+        if aspect_ratio <= max_patch_aspect_ratio:
+            # No patching, single full-frame detection with global optical flow
+            patch = frame
+            patch_gray = gray_frame
+            patch_idx = 0
+
+            should_full_detect = (
+                self.optical_flow.prev_gray is None or
+                not self.optical_flow.prev_detections or
+                self.frames_since_full_detection >= self.max_detection_interval or
+                (self.frames_since_full_detection >= self.full_detection_interval and 
+                motion_magnitude > self.motion_threshold)
+            )
+
+            if should_full_detect:
+                detections = self.obtain_detections(patch)
+                stats["used_full_detection"] = True
+                stats["inference_time"] = self.last_inference_time
+                stats["used_adaptive_resolution"] = self.adaptive_used_this_frame
+                self.frames_since_full_detection = 0
+
+                self.optical_flow.prev_detections = detections.copy()
+                self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(detections)
+                self.optical_flow.prev_gray = patch_gray.copy()
+            else:
+                detections = self.optical_flow.propagate_detections(patch_gray)
+                if detections:
+                    stats["used_optical_flow"] = True
+                    self.frames_since_full_detection += 1
+                else:
+                    detections = self.obtain_detections(patch)
+                    stats["used_full_detection"] = True
+                    stats["inference_time"] = self.last_inference_time
+                    stats["used_adaptive_resolution"] = self.adaptive_used_this_frame
+                    self.frames_since_full_detection = 0
+
+                    self.optical_flow.prev_detections = detections.copy()
+                    self.optical_flow.detection_centers = self.optical_flow.extract_detection_centers(detections)
+                    self.optical_flow.prev_gray = patch_gray.copy()
+
+            all_detections = detections
+
+        else:
+            # Patching with per-patch flow
+            stats["used_patching"] = True
+            if self.coordinates is None:
+                target_patch_ratio = 1.2
+                initial_patch_w = int(h * target_patch_ratio)
+                effective_patch_w = max(initial_patch_w, int(w / max_patches))
+                step = int(effective_patch_w * (1 - overlap_ratio))
+
+                coords = []
+                x = 0
+                while x + effective_patch_w < w:
+                    coords.append(x)
+                    x += step
+
+                # Ensure the final patch covers the right edge
+                if not coords or coords[-1] + effective_patch_w < w:
+                    coords.append(w - effective_patch_w)
+
+                # Enforce patch limit
+                if max_patches is not None and len(coords) > max_patches:
+                    step = (w - effective_patch_w) // (max_patches - 1)
+                    coords = [i * step for i in range(max_patches - 1)] + [w - effective_patch_w]
+
+                self.coordinates = coords  # Cache for future frames
+                self.effective_patch_w = effective_patch_w
+
+            stats["num_patches"] = len(self.coordinates)
+
+            for patch_idx, x_offset in enumerate(self.coordinates):
+                patch = frame[:, x_offset:x_offset + self.effective_patch_w]
+                patch_gray = gray_frame[:, x_offset:x_offset + self.effective_patch_w]
+
+
+                prev_gray = self.prev_patch_grays.get(patch_idx)
+                prev_detections = self.prev_patch_detections.get(patch_idx, [])
+                prev_centers = self.prev_patch_centers.get(patch_idx, [])
+
+                should_full_detect = (
+                    prev_gray is None or
+                    not prev_detections or
+                    self.frames_since_full_detection >= self.max_detection_interval or
+                    (self.frames_since_full_detection >= self.full_detection_interval and 
+                    motion_magnitude > self.motion_threshold)
+                )
+
+                if should_full_detect:
+                    patch_detections = self.obtain_detections(patch)
+                    stats["used_full_detection"] = True
+                    stats["inference_time"] += self.last_inference_time
+                    stats["used_adaptive_resolution"] |= self.adaptive_used_this_frame
+                    self.frames_since_full_detection = 0
+                else:
+                    # Temporarily inject per-patch data for optical flow
+                    self.optical_flow.prev_gray = prev_gray
+                    self.optical_flow.prev_detections = prev_detections
+                    self.optical_flow.detection_centers = prev_centers
+
+                    patch_detections = self.optical_flow.propagate_detections(patch_gray)
+                    if patch_detections:
+                        stats["used_optical_flow"] = True
+                        self.frames_since_full_detection += 1
+                    else:
+                        patch_detections = self.obtain_detections(patch)
+                        stats["used_full_detection"] = True
+                        stats["inference_time"] += self.last_inference_time
+                        stats["used_adaptive_resolution"] |= self.adaptive_used_this_frame
+                        self.frames_since_full_detection = 0
+
+                relative_detections = []
+                for d in patch_detections:
+                    x1, y1, x2, y2 = d["bbox"]
+                    rel_box = (x1 - x_offset, y1, x2 - x_offset, y2)
+                    relative_detections.append({
+                        "bbox": rel_box,
+                        "conf": d["conf"],
+                        "class": d["class"],
+                        "propagated": d.get("propagated", False)
+                    })
+
+                self.prev_patch_grays[patch_idx] = patch_gray.copy()
+                self.prev_patch_detections[patch_idx] = relative_detections
+                self.prev_patch_centers[patch_idx] = self.optical_flow.extract_detection_centers(relative_detections)
+
+                # Offset detection coordinates to global frame
+                for d in patch_detections:
+                    x1, y1, x2, y2 = d["bbox"]
+                    d["bbox"] = (x1 + x_offset, y1, x2 + x_offset, y2)
+                    all_detections.append(d)
+
+            all_detections = non_max_merge(all_detections, iou_thresh=0.5)
+
+        if filter and self.field_mask is not None:
+            all_detections = filter_detections_by_mask(all_detections, self.field_mask)
+        self.prev_gray_full_frame = gray_frame.copy()
+
+        stats["total_detections"] = len(all_detections)
+        return all_detections, stats
+
+
+    def process_video(
         self,
         input_path: str,
         output_path: str,
@@ -364,13 +678,6 @@ class OptimizedPlayerTracker:
             "motion_magnitudes": []
         }
 
-        print(f"Starting optimized video processing...")
-        print(f"Input: {input_path}")
-        print(f"Output: {output_path}")
-        print(f"Optimizations enabled:")
-        print(f" - Optical Flow: {self.use_optical_flow}")
-        print(f" - Adaptive Resolution: {self.use_adaptive_resolution}")
-
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -386,7 +693,7 @@ class OptimizedPlayerTracker:
             frame_start: float = time.time()
 
             # Use fully optimized detection
-            detections, frame_stats = self.process_frame_fully_optimized(frame)
+            detections, frame_stats = self.process_frame_combined_with_patch_flow(frame)
 
             # Update statistics
             if frame_stats["used_full_detection"]:
@@ -487,44 +794,7 @@ class OptimizedPlayerTracker:
         out.release()
         if display:
             cv2.destroyAllWindows()
-
-        # Final statistics
-        total_time = time.time() - total_start_time
-        total_processed = frame_id
         
-        compute_savings = (optimization_stats["optical_flow_frames"] / max(1, total_processed)) * 100
-        adaptive_usage = (optimization_stats["adaptive_resolution_frames"] / max(1, total_processed)) * 100
-
-        print(f"\n{'='*50}")
-        print(f"OPTIMIZATION RESULTS")
-        print(f"{'='*50}")
-        print(f"Total frames processed: {total_processed}")
-        print(f"Processing time: {total_time:.1f}s")
-        print(f"Average FPS: {total_processed/total_time:.1f}")
-        print(f"")
-        print(f"Detection Method Usage:")
-        print(f"  Full detections: {optimization_stats['full_detections']} ({optimization_stats['full_detections']/total_processed*100:.1f}%)")
-        print(f"  Optical flow frames: {optimization_stats['optical_flow_frames']} ({compute_savings:.1f}%)")
-        print(f"")
-        print(f"Feature Usage:")
-        print(f"  Adaptive resolution: {optimization_stats['adaptive_resolution_frames']} frames ({adaptive_usage:.1f}%)")
-        
-        if optimization_stats["full_detections"] > 0:
-            avg_inference = optimization_stats["total_inference_time"] / optimization_stats["full_detections"]
-            print(f"  Average inference time: {avg_inference*1000:.1f}ms per detection")
-        
-        if optimization_stats["motion_magnitudes"]:
-            avg_motion = np.mean(optimization_stats["motion_magnitudes"])
-            print(f"  Average scene motion: {avg_motion:.1f} pixels/frame")
-        
-        print(f"")
-        print(f"Performance Improvement:")
-        theoretical_standard_time = total_processed * 0.08  # Assume 80ms per frame for standard processing
-        actual_time = total_time
-        speedup = theoretical_standard_time / actual_time if actual_time > 0 else 1
-        print(f"  Estimated speedup: {speedup:.1f}x")
-        print(f"  Computational savings: {compute_savings:.1f}%")
-
 
 def create_optimized_tracker(model_path: str, **kwargs) -> OptimizedPlayerTracker:
     """
@@ -540,17 +810,16 @@ def create_optimized_tracker(model_path: str, **kwargs) -> OptimizedPlayerTracke
     tracker.use_adaptive_resolution = False
     
     # Optimize parameters for performance
-    tracker.full_detection_interval = 6  # Run full detection every 6 frames
     tracker.max_detection_interval = 12  # Force detection after 12 frames
-    tracker.conf_thresh = 0.25  # Slightly lower confidence for better tracking
-    tracker.motion_threshold = 35.0  # Adjusted for sports videos
+    tracker.conf_thresh = 0.1  # Slightly lower confidence for better tracking
+    tracker.motion_threshold = 5.0  # Adjusted for sports videos
     
     return tracker
 
 
 if __name__ == "__main__":
     # Example usage
-    input_video = "videos/hqsport-clip.mp4"
+    input_video = "videos/Futbol_Ejemplo_ Wide_1.mp4"
     output_dir = "videos/output_videos" 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -563,7 +832,7 @@ if __name__ == "__main__":
     tracker: OptimizedPlayerTracker = create_optimized_tracker(
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        frame_interval=3,  # Can be 1 with optimizations
+        frame_interval=3,
         onnx=onnx,
         chosen_resolution="FHD",
         input_video=input_video
@@ -572,7 +841,7 @@ if __name__ == "__main__":
     output_path = os.path.join(output_dir, "output_optimized_tracking.mp4")
     
     print(f"Processing video with optimized tracker...")
-    tracker.process_video_optimized(
+    tracker.process_video(
         input_video,
         output_path,
         tracking=False,

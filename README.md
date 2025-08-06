@@ -17,11 +17,13 @@ The folder /ai_camera is the main folder of the repository. It contains the rest
     - /src contains the source code and the __init__.py file. Not all fles are used, some of them where developed for trials or testing.
 
 ## How to run?
-From ai_camera, run python -m src.<name_of_the_file_without_extension> to run that file, like python -m src.object_detector
+From ai_camera, run python -m src.<name_of_the_file_without_extension> to run that file, like python -m src.player_tracker
 
 To obtain the datasets to train models, the prepare_ files are used. Each of them specifies what kind of data is prepared.
 
-motion_detector.py and object_detector.py are the files used for object detection, bia open_cv or yolo, respectively.
+player_tracker.py perfmors player tracking and final camera control on the input video selected. There are multiple hyperparameters that can be adjusted according to the video processed. The model used is YOLOV8n, in addition to its quantizied version, which is a much more lightweight approach providing almost the same performance. The code performs a full YOLO detection every n frames, meanwhile tracking detections with optical flow. Adaptive resolution can also be included to adjust the input resolution based on the complexity of the scene analyzed (via edge detector).
+
+When input resolution is too horizontal (on wide view settings, for example), the system can divide each frame in different patches, process each of them independently, and merge detections afterwards. However, this option can cause significant perfomance issues as multiple forward passes need to be done at the same time.
 
 Install the necessary libraries using pip install -r requirements.txt
 

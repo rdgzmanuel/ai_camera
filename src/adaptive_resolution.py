@@ -22,7 +22,8 @@ class AdaptiveResolutionDetector:
         
         # Quality metrics
         self.min_detection_count = 3  # Minimum detections expected in active scenes
-        
+
+
     def estimate_scene_complexity(self, frame: np.ndarray) -> float:
         """
         Estimate scene complexity based on edge density and motion.
@@ -63,19 +64,20 @@ class AdaptiveResolutionDetector:
         # If inference is too slow, reduce resolution
         if avg_inference_time > self.target_inference_time * 1.2:
             new_size = max(self.min_size, self.current_size - 64)
-        
+
         # If we have spare computational capacity and low detection count or high complexity
         elif (avg_inference_time < self.target_inference_time * 0.8 and 
               (avg_detection_count < self.min_detection_count or scene_complexity > 30)):
             new_size = min(self.max_size, self.current_size + 64)
-        
+
         # Smooth transitions
         if abs(new_size - self.current_size) > 0:
             self.current_size = new_size
             print(f"Adjusted resolution to {self.current_size}x{self.current_size}")
-        
+
         return self.current_size
-    
+
+
     def detect_with_adaptive_resolution(self, frame: np.ndarray, 
                                       conf_thresh: float = 0.3,
                                       iou_thresh: float = 0.1) -> tuple[list[dict], float]:
