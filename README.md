@@ -1,46 +1,130 @@
-# ai_camera
-Repository containing the code for developing an automated camera control system.
+<center>
+<h1 align="center">Azzulei Technologies - AI</h1>
+<p align="center">AI Camera and Virtual Commentary System</p>
+<br>
+</center>
 
+This repository contains the source code of Azzulei Technologies' AI camera control system and virtual commentary generator.
 
-## Folder structure
-The folder /ai_camera is the main folder of the repository. It contains the rest of the required files and directories:
-    - /models contains the downloaded models for object detection. Link to model download page: https://github.com/ultralytics/ultralytics
+The former is a pipeline for automating camera control in live sports events using fixed cameras. This allows viewers to enjoy a much more pleasant experience, with the video focused on the actual action on the field. It works by detecting football players (with potential to extend to other sports) and uses PID control to move the camera, aiming to include a high percentage of detected players. As a future improvement, ball detection could enhance the output, although this has proven difficult due to varying video conditions, the small size of the ball, and its high speed.
 
-    - /videos contains the input videos in which to perform object detection. Also contains the downloaded and prepared soccertrack
-    dataset for model training.
+The latter is a virtual commentary generation system designed to play when a viewer joins a live stream. It is based on a JSON file that stores match-related information, such as stadium, weather conditions, and rival teams. This file is passed to an LLM (Large Language Model) to generate text, which is then converted to MP4 using TTS (Text-to-Speech).
 
-    - .gitignore includes the folders that are ignored by git when pushing to the repo. These are large and heavy folders that are better
-    kept on lccal devices.
+---
 
-    - .yaml file includes the specification for the yolo finetuning process.
+### Repository Layout
 
-    - /src contains the source code and the __init__.py file. Not all fles are used, some of them where developed for trials or testing.
+```text
+.
+├── src/                                  # Source code
+│   ├── quantization/                     # Model quantization files (via ONNX)
+│   ├── unused/                           # Deprecated files (early development)
+│   │   ├── divide_yolo_dataset.py        # Splits YOLO data for fine-tuning
+│   │   ├── models.py                     # Initial fine-tuning approach
+│   │   ├── object_detector.py            # Early object detection implementation
+│   │   ├── prepare_ball_only.py          # Prepares YOLO dataset for ball-only detection
+│   │   ├── prepare_no_ball.py            # Prepares YOLO dataset for player-only detection
+│   │   ├── test_import.py                # Library test file
+│   │   └── train_yolo.py                 # YOLO fine-tuning
+│   │
+│   ├── __init__.py                       # Enables odule formatting
+│   ├── adaptive_resolution.py            # Adapts input resolution based on scene complexity
+│   ├── commentary.py                     # Generates virtual commentary
+│   ├── config.py                         # Contains secret keys (not pushed)
+│   ├── controller.py                     # PID control system
+│   ├── download_soccertrack.py           # Downloads SoccerTrack dataset
+│   ├── football_field_detection.py       # Detects field coordinates for filtering
+│   ├── optical_flow.py                   # Optical flow for performance optimization
+│   ├── player_tracker.py                 # Performs player tracking with optimizations
+│   └── utils.py                          # Auxiliary functions
+│
+├── videos/                               # Input videos for testing
+├── football.yaml                         # YOLO fine-tuning configuration
+├── requirements.txt                      # Required Python packages
+└── README.md                             # You are here 🖖
+```
 
-## How to run?
-From ai_camera, run python -m src.<name_of_the_file_without_extension> to run that file, like python -m src.player_tracker
+---
 
-To obtain the datasets to train models, the prepare_ files are used. Each of them specifies what kind of data is prepared.
+## Folder Structure
 
-player_tracker.py perfmors player tracking and final camera control on the input video selected. There are multiple hyperparameters that can be adjusted according to the video processed. The model used is YOLOV8n, in addition to its quantizied version, which is a much more lightweight approach providing almost the same performance. The code performs a full YOLO detection every n frames, meanwhile tracking detections with optical flow. Adaptive resolution can also be included to adjust the input resolution based on the complexity of the scene analyzed (via edge detector).
+The `/ai_camera` folder is the main directory of the repository. It contains all the required files and subdirectories:
 
-When input resolution is too horizontal (on wide view settings, for example), the system can divide each frame in different patches, process each of them independently, and merge detections afterwards. However, this option can cause significant perfomance issues as multiple forward passes need to be done at the same time.
+- `/models`: Downloaded models for object detection.  
+  ➤ [Model download link](https://github.com/ultralytics/ultralytics)
 
-Install the necessary libraries using pip install -r requirements.txt
+- `/videos`: Input videos for object detection and prepared SoccerTrack dataset for model training.
 
-To start using the code, two repositories need to be cloned at the same level of ai_camera (outside it):
+- `.gitignore`: Specifies files and folders to be ignored by Git (e.g., large local files).
 
-### ByteTrack ###
+- `.yaml`: Configuration for YOLO fine-tuning.
+
+- `/src`: Source code, including `__init__.py`. Some files are deprecated or used for testing.
+
+---
+
+## How to Run
+
+From the `ai_camera` directory, run:
+
+```bash
+python -m src.<file_name_without_extension>
+```
+
+For example:
+
+```bash
+python -m src.player_tracker
+```
+
+To prepare datasets for training, use the `prepare_*.py` files — each is designed for a specific type of data (ball only, no ball, etc.).
+
+`player_tracker.py` performs player tracking and final camera control on a selected input video. Multiple hyperparameters can be adjusted depending on the input. It uses the YOLOv8n model and its quantized version, which offers a lightweight alternative with nearly equal performance. The system runs full YOLO detections every _n_ frames, tracking in between using optical flow. Adaptive resolution can be enabled to adjust input size dynamically based on scene complexity (using edge detection).
+
+For wide-view settings, where the input resolution is highly horizontal, the system can divide frames into patches, process them independently, and merge detections. This improves detection but can significantly reduce performance due to multiple forward passes.
+
+---
+
+## Installation
+
+Install required libraries using:
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## Dependencies
+
+To use this repository, clone the following dependencies **outside** the `ai_camera` folder (at the same directory level):
+
+---
+
+### [ByteTrack](https://github.com/ifzhang/ByteTrack)
+
+```bash
 git clone https://github.com/ifzhang/ByteTrack.git
 cd ByteTrack
 pip install -r requirements.txt
 python setup.py develop
+```
 
+---
 
- Only if it was not installed with the requirements:
+### [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) *(Only if not installed via `requirements.txt`)*
 
-### YOLOX ###
+```bash
 git clone https://github.com/Megvii-BaseDetection/YOLOX
 cd YOLOX
 pip install -v -e .
+```
 
-Two files neede to be fixed: replace dtype=np.float by dtype=float in YOLO/yolox/tracker/matching.py and byte_tracker.py
+**Note:**  
+You’ll need to manually fix two files:  
+Replace `dtype=np.float` with `dtype=float` in:
+
+- `YOLOX/yolox/tracker/matching.py`
+- `YOLOX/yolox/tracker/byte_tracker.py`
+
+---

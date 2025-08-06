@@ -1,9 +1,0 @@
-# roboflow
-
-path: roboflow
-
-train: train/images
-val: valid/images
-
-nc: 3
-names: ['ball', 'player', 'referee']
