@@ -1,6 +1,5 @@
 import json
 from typing import Dict, Literal
-import os
 
 import requests
 from gtts import gTTS
