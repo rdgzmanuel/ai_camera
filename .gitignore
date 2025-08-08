@@ -1,1 +1,20 @@
 /venv
+
+/videos
+/src/quantization/calibration_data
+
+/models
+
+/runs
+
+/roboflow
+/field_coordinates
+
+/commentary
+
+# Keys
+/src/config.py
+
+# Cache
+/src/__pycache__*.pyc
+/src/__pycache__

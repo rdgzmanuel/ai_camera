@@ -1,0 +1,6 @@
+# football.yaml
+path: videos/soccertrack/yolo_dataset_no_ball
+train: images/train
+val: images/val
+nc: 2
+names: ['player', 'ball']
