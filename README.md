@@ -34,6 +34,7 @@ The latter is a virtual commentary generation system designed to play when a vie
 │   ├── controller.py                     # PID control system
 │   ├── download_soccertrack.py           # Downloads SoccerTrack dataset
 │   ├── football_field_detection.py       # Detects field coordinates for filtering
+│   ├── ollama_gpt-oss.py                 # Interact with gpt-oss:20b for commentary generation
 │   ├── optical_flow.py                   # Optical flow for performance optimization
 │   ├── player_tracker.py                 # Performs player tracking with optimizations
 │   └── utils.py                          # Auxiliary functions
@@ -82,6 +83,14 @@ To prepare datasets for training, use the `prepare_*.py` files — each is desig
 `player_tracker.py` performs player tracking and final camera control on a selected input video. Multiple hyperparameters can be adjusted depending on the input. It uses the YOLOv8n model and its quantized version, which offers a lightweight alternative with nearly equal performance. The system runs full YOLO detections every _n_ frames, tracking in between using optical flow. Adaptive resolution can be enabled to adjust input size dynamically based on scene complexity (using edge detection).
 
 For wide-view settings, where the input resolution is highly horizontal, the system can divide frames into patches, process them independently, and merge detections. This improves detection but can significantly reduce performance due to multiple forward passes.
+
+Commentary generation is done in the `commentary.py` file, where you can choose the LLM and TTS providers. gpt-oss:20b (OpenAI opens source model) requires previuous installation via ollama, following the next steps:
+
+1. [Ollama download link](https://ollama.com/download)
+2. Download gpt-oss:20b thorugh a terminal using ollama. To do that, open a terminal and run:
+```bash
+ollama pull gpt-oss:20b
+```
 
 ---
 

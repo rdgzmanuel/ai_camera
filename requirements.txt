@@ -1,4 +1,5 @@
 absl-py==2.3.0
+accelerate==1.10.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.12.14
 aiosignal==1.4.0
@@ -45,9 +46,11 @@ grpcio-status==1.71.2
 gTTS==2.5.4
 h11==0.16.0
 h5py==3.14.0
+hf-xet==1.1.7
 httpcore==1.0.9
 httplib2==0.22.0
 httpx==0.28.1
+huggingface-hub==0.34.3
 humanfriendly==10.0
 idna==3.7
 imageio==2.37.0
@@ -75,6 +78,7 @@ nest-asyncio==1.6.0
 networkx==3.5
 ninja==1.11.1.4
 numpy==2.3.0
+ollama==0.5.3
 onnx==1.17.0
 onnxruntime==1.22.0
 onnxruntime-tools==1.7.0
@@ -111,10 +115,12 @@ python-dotenv==1.1.1
 pytz==2025.2
 PyYAML==6.0.2
 pyzmq==27.0.0
+regex==2025.7.34
 requests==2.32.4
 requests-toolbelt==1.0.0
 roboflow==1.2.0
 rsa==4.9.1
+safetensors==0.6.1
 scikit-image==0.25.2
 scipy==1.15.3
 six==1.17.0
@@ -127,6 +133,7 @@ tensorboard==2.19.0
 tensorboard-data-server==0.7.2
 thop==0.1.1.post2209072238
 tifffile==2025.6.11
+tokenizers==0.21.4
 torch==2.7.1
 torchaudio==2.7.1
 torchmetrics==1.7.3
@@ -134,6 +141,7 @@ torchvision==0.22.1
 tornado==6.5.1
 tqdm==4.67.1
 traitlets==5.14.3
+transformers==4.55.0
 typing-inspection==0.4.1
 typing_extensions==4.14.0
 tzdata==2025.2
