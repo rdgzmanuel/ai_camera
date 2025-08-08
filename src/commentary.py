@@ -1,5 +1,7 @@
 import json
-from typing import Dict, Literal
+from typing import Literal
+from ollama import chat
+from ollama import ChatResponse
 
 import requests
 from gtts import gTTS
@@ -11,8 +13,8 @@ import src.config as config
 LLMProvider = Literal["openai", "anthropic", "mistral", "google", "groq"]
 TTSProvider = Literal["gtts", "edge", "elevenlabs", "voicemaker"]
 
-SELECTED_LLM: LLMProvider = "groq"
-SELECTED_TTS: TTSProvider = "voicemaker"
+SELECTED_LLM: LLMProvider = "openai"
+SELECTED_TTS: TTSProvider = "elevenlabs"
 
 # === API KEYS ===
 OPENAI_API_KEY: str = config.OPENAI_API_KEY
@@ -23,44 +25,55 @@ HF_API_KEY: str = config.HF_API_KEY
 GOOGLE_API_KEY: str = config.GOOGLE_API_KEY
 VOICEMAKER_API_KEY: str = config.VOICE_MAKER_API_KEY
 
-# === FUNCTIONS ===
 
 def load_match_data(filepath: str) -> dict:
     with open(filepath, "r", encoding="utf-8") as f:
         return json.load(f)["data"]
 
 
-def build_prompt(data: Dict) -> str:
-    # return f"""
-    # Generate a 1-minute spoken introduction in Spanish (Spain) for a live football stream. 
-    # Mention the stadium '{data['stadium']['name']}', its features, and today's weather. 
-    # Talk about the local team '{data['local_team']['name']}', their league position, top scorer {data['local_team']['top_scorer']['name']} with {data['local_team']['top_scorer']['goals']} goals, and coach. 
-    # Do the same for the visiting team '{data['visiting_team']['name']}'.
-    # Make it exciting and informative for a new viewer joining the stream.
-    # """
+def generate_prompt(data_path: str) -> str:
+    """
+    Generates a prompt based on the match data.
+    Args:
+        data_path (str): Path to the match data JSON file.
+    Returns:
+        str: Formatted prompt string.
+    """
 
-    return f"""
-    Generate a 1-minute spoken introduction in Spanish (Spain) for a live football stream. 
+    match_data: dict = load_match_data(data_path)
+    prompt = f"""Generate a 50-second spoken introduction in Spanish (Spain) for a live football stream. 
     Mention the stadium, its features, and today's weather. 
     Talk about the local team, their league position, top scorer with number of goals, and coach. 
     Do the same for the visiting team.
     Make it exciting and informative for a new viewer joining the stream.
-    This is the data: {data}. No need to mention everything. Give me directly and only the commentary text.
-    """
+    This is the data: {match_data}. No need to mention everything. Give me directly and only the commentary text.
+    Make sure every character is easily readable.\n"""
+    return prompt
+
 
 # === LLM PROVIDERS ===
 
-def generate_text_openai(prompt: str) -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
+def generate_text_openai(prompt: str, model: str = "gpt-oss:20b") -> str:
+    """
+    Generates a response from the LLM based on the provided prompt.
+    Args:
+        prompt (str): The input prompt for the LLM.
+        model (str): The model to use for generating the response.
+    Returns:
+        str: The generated response from the LLM.
+    """
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=500,
-        temperature=0.8
-    )
-    return response.choices[0].message.content.strip()
+    response: ChatResponse = chat(model=model, messages=[
+    {
+        "role": "user",
+        "content": prompt,
+    },
+    ])
+    # print(response["message"]["content"])
+    content: str = response["message"]["content"].strip()
+    # print(response.message.content)
+
+    return content
 
 
 def generate_text_anthropic(prompt: str) -> str:
@@ -150,17 +163,16 @@ def tts_elevenlabs(text: str, output_path: str):
     )
 
     response = elevenlabs.text_to_speech.convert(
-        voice_id="TZ3pgF19H1pelFonL8Zq", # Pablo: TZ3pgF19H1pelFonL8Zq   Gabo: o0SveC0zgHFuCsEO3vHR
+        voice_id="TZ3pgF19H1pelFonL8Zq",  # Pablo TZ3pgF19H1pelFonL8Zq    Gabo: o0SveC0zgHFuCsEO3vHR
         output_format="mp3_22050_32",
         text=text,
-        model_id="eleven_turbo_v2_5", # use the turbo model for low latency
-        # Optional voice settings that allow you to customize the output
+        model_id="eleven_turbo_v2_5",
         voice_settings=VoiceSettings(
-            stability=0.0,
-            similarity_boost=1.0,
-            style=0.0,
-            use_speaker_boost=True,
-            speed=1.0,
+            stability=0.2,           # keeps some variety for excitement
+            similarity_boost=1.0,    # stay close to chosen voice
+            style=0.85,              # adds drama and energy
+            use_speaker_boost=True,  # richer, more present sound
+            speed=1.12,              # faster pacing like commentary
         ),
     )
 
@@ -182,7 +194,7 @@ def tts_voicemaker(text: str, output_path: str):
 
     payload = {
         "Engine": "neural",
-        "VoiceId": "ai3-es-ES-Lorenzo",         # You can change to other voices
+        "VoiceId": "ai3-es-ES-Lorenzo",
         "LanguageCode": "es-ES",
         "Text": text,
         "OutputFormat": "mp3",
@@ -230,16 +242,12 @@ def run_tts(text: str, provider: TTSProvider, output_path: str):
 # === MAIN EXECUTION ===
 
 def main(data_info_path: str):
-    match_data = load_match_data(data_info_path)
-    prompt = build_prompt(match_data)
+    prompt = generate_prompt(data_info_path)
     print("Generating commentary text...")
-    # commentary = generate_text(prompt, SELECTED_LLM)
-    # print("Generated text:\n", commentary)
+    commentary = generate_text(prompt, SELECTED_LLM)
+    print("Generated text:\n", commentary)
 
-    commentary = """ ¡Bienvenidos a la retransmisión en directo del partido entre la Agrupación Deportiva Colmenar Viejo y el Club Deportivo Sanse!  Desde el espectacular estadio Alberto Ruiz en Colmenar Viejo, Madrid, un campo con capacidad para 5000 espectadores y con gradas cubiertas, marcador electrónico… ¡y un techo amarillo que lo hace inconfundible!  Hoy, con un sol radiante y 20 grados, se espera un ambientazo.
-    El Colmenar Viejo, líder de la liga, llega con cinco victorias y un empate en sus últimos seis partidos.  Su estrella, Juan Pérez Bonilla, con 12 goles, buscará aumentar su cuenta, guiado por el experimentado entrenador Carlos García.
-    Enfrente, el Club Deportivo Sanse, segundo clasificado, un rival directo con un juego muy ofensivo.  Miguel Torres Sánchez, su pichichi con 14 goles, será una amenaza constante.  La entrenadora Laura Fernández Ortega, con 3 años de experiencia, buscará dar la sorpresa.
-     ¡Comenzamos!"""
+    # commentary = "¡Buenas tardes, espectadores! Nos encontramos en el estadio Alberto Ruiz, uno de los más grandes de la liga con 5 000 plazas, en Colmenar Viejo. Hoy hace 20 grados bajo un cielo despejado. En casa, la Agrupación Deportiva Colmenar Viejo, lidera la tabla con un sólido record de victorias y empates; su máximo goleador es Juan Pérez Bonilla con 12 tantos, y el equipo está a cargo de Carlos García, con 5 años de experiencia. Del otro lado, el Club Deportivo Sanse ocupa el segundo puesto; su estrella es Miguel Torres Sánchez, 14 goles, y su entrenador, Laura Fernández Ortega, lleva 3 años guiando al equipo. ¡Que comience el partido!"
 
     print("Converting to audio...")
     run_tts(commentary, SELECTED_TTS, "commentary/commentary.mp3")

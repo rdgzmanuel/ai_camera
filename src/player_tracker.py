@@ -737,7 +737,7 @@ class OptimizedPlayerTracker:
                         frame = draw_detections(frame, detections)
                     frame = draw_boxes(frame, tight_box, expanded_box)
 
-            frame = cv2.resize(frame, self.resolution)
+            # frame = cv2.resize(frame, self.resolution)
 
             frame, effective_fps, total_frames = compute_fps(
                 frame, fps_window, total_start_time, total_frames, frame_start
@@ -819,7 +819,7 @@ def create_optimized_tracker(model_path: str, **kwargs) -> OptimizedPlayerTracke
 
 if __name__ == "__main__":
     # Example usage
-    input_video = "videos/Futbol_Ejemplo_ Wide_1.mp4"
+    input_video = "videos/soccertrack/wide_view/videos/F_20200220_1_0000_0030.mp4"
     output_dir = "videos/output_videos" 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -832,7 +832,7 @@ if __name__ == "__main__":
     tracker: OptimizedPlayerTracker = create_optimized_tracker(
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        frame_interval=3,
+        frame_interval=5,
         onnx=onnx,
         chosen_resolution="FHD",
         input_video=input_video
